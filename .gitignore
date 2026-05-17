@@ -30,3 +30,6 @@ Thumbs.db
 
 # Daemon runtime
 .ocp/
+
+# Local Claude Code instructions (developer-private)
+CLAUDE.md
