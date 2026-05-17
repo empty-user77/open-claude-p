@@ -111,19 +111,18 @@ async function main() {
     options['allowed-tools'] = merged;
   }
 
-  // CLI-only default: when no permission flag is supplied at all (no
-  // `--dangerously-skip-permissions`, no `--permission-mode`), drop into
-  // `acceptEdits` so edits / writes flow through without a per-call
-  // prompt that the non-interactive PTY can't answer. This is the
-  // "auto mode" most users want from a headless `ocp "…"` invocation.
-  // Bypass mode is strictly more permissive (and noisier in audits) so
-  // we don't apply it unless the user opted in explicitly.
-  // Set OCP_NO_DEFAULT_PERMISSION_MODE=1 to keep `default` mode.
-  if (options['dangerously-skip-permissions'] !== true
-   && (options['permission-mode'] === undefined || options['permission-mode'] === '')
-   && process.env.OCP_NO_DEFAULT_PERMISSION_MODE !== '1') {
-    options['permission-mode'] = 'acceptEdits';
-  }
+  // No CLI-side `--permission-mode` default. `acceptEdits` looked
+  // attractive ("auto-accept edits, prompt for rest"), but in PTY
+  // interactive mode claude's permission prompt is an interactive y/n
+  // box the headless driver can't answer — so any tool NOT in
+  // `--allowed-tools` still hangs the turn. `bypassPermissions` (=
+  // `--dangerously-skip-permissions`) is the only mode that's truly
+  // hang-free, and we don't default to it because it's a real security
+  // escalation (Bash, Edit, Write all run unprompted). Users who want
+  // full auto set `OCP_DEFAULT_SKIP_PERMS=1` once in their shell, or
+  // pass `--dangerously-skip-permissions` per call. The `--allowed-tools`
+  // default below pre-approves the safe network tools so the most
+  // common case (current-info queries) works without bypass.
 
   // Per-invocation reminder when both opt-in envs are active — that
   // combination means "any new cwd auto-trusted + every tool runs

@@ -209,7 +209,6 @@ When you should skip the daemon:
 | `OCP_DAEMON_MAX_PARALLEL` | Max warm PTYs the daemon keeps for concurrent fresh requests | `8` |
 | `OCP_NO_DEFAULT_PROMPT` | Set to `1` to suppress the CLI's default tool-use system prompt | — |
 | `OCP_NO_DEFAULT_TOOLS` | Set to `1` to NOT pre-approve `WebSearch`/`WebFetch` | — |
-| `OCP_NO_DEFAULT_PERMISSION_MODE` | Set to `1` to keep the default `--permission-mode` (no auto-`acceptEdits`) | — |
 | `OCP_DIR` | Override the daemon state directory | `~/.ocp` |
 
 ### Driver / Pool Environment Variables
