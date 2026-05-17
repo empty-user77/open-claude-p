@@ -547,9 +547,20 @@ class Driver {
     // we never resolved. Returning it to the pool would let the next
     // request reuse a PTY whose UI state is dirty. Force the non-pooled
     // tear-down path in those cases.
+    //
+    // `timeout` and `write-failed` are also dirty — the PTY is stuck
+    // mid-response (probably mid-tool-call or mid-render), and parking
+    // it would make the very next pool acquire reuse a hung PTY and
+    // see the same timeout. That was the root cause of the user-visible
+    // "sometimes the second `ocp` call hangs forever" pattern when
+    // running several `ocp` calls in parallel in the same cwd: one PTY
+    // timed out, got parked dirty, and every subsequent acquire of
+    // that pool slot inherited the hang.
     const dirty = completion.reason === 'cancelled'
                || completion.reason === 'trust-required'
-               || completion.reason === 'interactive-required';
+               || completion.reason === 'interactive-required'
+               || completion.reason === 'timeout'
+               || completion.reason === 'write-failed';
     if (poolKey && session.state !== 'dead' && !dirty) {
       // Pooled path — park for reuse. Context is preserved (no /clear).
       await pool.release(session, poolKey, capturedSessionId);
