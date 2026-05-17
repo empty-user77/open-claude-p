@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Open Claude -p Chat — ocp monitor</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+
+    <!-- ── Sidebar ────────────────────────────────────────── -->
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <div class="sidebar-brand">
+          <span class="brand-icon">◆</span>
+          <span class="brand-name">Open Claude -p Chat</span>
+        </div>
+        <button class="new-chat-btn" id="newChatBtn">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          New Chat
+        </button>
+      </div>
+
+      <div class="sidebar-section-label">History</div>
+
+      <div class="conversation-list" id="conversationList">
+        <div class="empty-state">No conversations yet</div>
+      </div>
+    </aside>
+
+    <!-- ── Main (split: chat | terminal) ─────────────────── -->
+    <div class="main">
+
+      <!-- Chat panel -->
+      <div class="chat-panel">
+
+        <!-- Welcome screen -->
+        <div class="welcome" id="welcome">
+          <div class="welcome-icon">◆</div>
+          <h1>Chat with Claude</h1>
+          <p>Start a new conversation or select one from the sidebar.<br>
+             Watch the PTY terminal on the right to see how ocp<br>
+             drives the Claude CLI via <strong>node-pty</strong>.</p>
+        </div>
+
+        <!-- Messages -->
+        <div class="messages" id="messages"></div>
+
+        <!-- Input -->
+        <div class="input-area">
+          <div class="input-inner">
+            <div class="input-wrapper">
+              <textarea id="messageInput" placeholder="Type a message…" rows="1"></textarea>
+              <button class="send-btn" id="sendBtn" title="Send (Enter)">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                  <line x1="22" y1="2" x2="11" y2="13"/>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                </svg>
+              </button>
+            </div>
+            <div class="input-hint">Enter to send &nbsp;·&nbsp; Shift+Enter for newline</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Drag handle -->
+      <div class="resizer" id="resizer"></div>
+
+      <!-- PTY terminal panel -->
+      <div class="terminal-panel" id="terminalPanel">
+        <div class="term-header">
+          <div class="term-title">
+            <span class="term-dot red"></span>
+            <span class="term-dot yellow"></span>
+            <span class="term-dot green"></span>
+            <span class="term-label">PTY Monitor — node-pty → claude CLI</span>
+          </div>
+          <button class="term-clear-btn" id="termClearBtn" title="Clear">Clear</button>
+        </div>
+        <!-- Active Processes -->
+        <div class="proc-panel" id="procPanel">
+          <div class="proc-header">Active Processes</div>
+          <div class="proc-list" id="procList">
+            <div class="proc-empty">No active processes</div>
+          </div>
+        </div>
+
+        <div class="term-body" id="termBody">
+          <div class="term-line info">
+            <span class="term-ts">--:--:--</span>
+            <span class="term-tag tag-info">INFO</span>
+            <span class="term-text">Connecting to monitor stream…</span>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /.main -->
+  </div><!-- /.app -->
+
+  <script src="app.js"></script>
+</body>
+</html>

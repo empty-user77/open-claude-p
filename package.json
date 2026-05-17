@@ -1,0 +1,68 @@
+{
+  "name": "open-claude-p",
+  "version": "1.0.0",
+  "description": "A PTY-backed compatibility shim for `claude -p` (Claude Code headless/print mode). Drives the interactive `claude` CLI via node-pty and exposes the same option surface and stream-json contract. Ships as both a library and an `ocp` CLI binary.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./chat": "./src/chat/index.js",
+    "./options": "./src/options/index.js",
+    "./parsers": "./src/parsers/index.js",
+    "./output": "./src/output/index.js",
+    "./pty": "./src/pty/index.js"
+  },
+  "bin": {
+    "ocp": "./bin/cli.js"
+  },
+  "files": [
+    "src",
+    "bin",
+    "scripts/postinstall.js",
+    "README.md",
+    "README.ko.md",
+    "README.ja.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/**/*.test.js",
+    "postinstall": "node scripts/postinstall.js",
+    "prepublishOnly": "npm test",
+    "pack:check": "npm pack --dry-run"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "claude-p",
+    "pty",
+    "node-pty",
+    "headless",
+    "cli",
+    "compatibility-shim"
+  ],
+  "author": "Lee Yongbeom <top6616@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/empty-user77/open-claude-p#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/empty-user77/open-claude-p.git"
+  },
+  "bugs": {
+    "url": "https://github.com/empty-user77/open-claude-p/issues"
+  },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/empty-user77"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "proper-lockfile": "^4.1.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

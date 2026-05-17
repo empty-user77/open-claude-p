@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Output / capture artifacts (may contain real conversation data)
+captures/
+sample/data/
+*.jsonl
+
+# Build / packaging
+*.tgz
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# Daemon runtime
+.ocp/
