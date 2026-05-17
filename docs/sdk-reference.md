@@ -82,7 +82,7 @@ const result = await chat.send({
   skillName: 'my-skill',              // optional, must be alphanumeric+_-
   onEvent(ev) { /* spinner, assistant-text, … */ },
   signal: abortController.signal,     // cancel mid-flight
-  maxResponseMs: 60_000,              // per-turn timeout override
+  maxResponseMs: 60_000,              // per-turn timeout override (default 86_400_000)
   appendSystemPrompt: '…',            // per-turn override
 });
 ```
@@ -246,7 +246,7 @@ const driver = createDriver({
   // claudeBin: '/path/to/claude',
   // poolSize: 1,
   // warmupMs: 2500,
-  // maxResponseMs: 60_000,
+  // maxResponseMs: 60_000,           // default 86_400_000 (24 h)
 });
 
 const result = await driver.runOneShot({
@@ -278,7 +278,7 @@ await driver.close();
 | `cwd` | `process.cwd()` | Spawn cwd. |
 | `debug` | `false` | Log spawn/extract/completion to stderr (argv values redacted). |
 | `warmupMs` | `2500` | Settle delay between spawn and looking for the input chevron. |
-| `maxResponseMs` | `60_000` | Hard timeout for a single `runOneShot()`. |
+| `maxResponseMs` | `86_400_000` (24 h) | Hard timeout for a single `runOneShot()`. The in-flight `idleMs` / `preIdleMs` silence detectors abort genuinely-stuck runs much earlier; this is just the worst-case ceiling. |
 | `firstResponseMs` | `20_000` | Max wait for a spinner / region event after the prompt is sent. Fast-fail with `interactive-required` if nothing arrives. |
 | `promptBoxWaitMs` | `15_000` | Max wait for the `❯` input chevron after warmup. Raise for cwds with heavy hook / MCP loading. |
 | `promptBoxSettleMs` | `400` | Small settle after the chevron lands. |

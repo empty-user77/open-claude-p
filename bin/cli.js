@@ -730,7 +730,7 @@ function buildHelp() {
   lines.push('  OCP_CLAUDE_BIN       Path to upstream `claude` binary (default: `claude`).');
   lines.push('  OCP_WARMUP_MS        Delay before sending the prompt (default: 2500).');
   lines.push('  OCP_IDLE_MS          Idle silence threshold for completion (default: 1500).');
-  lines.push('  OCP_MAX_RESPONSE_MS  Hard timeout (default: 60000).');
+  lines.push('  OCP_MAX_RESPONSE_MS  Hard timeout in ms (default: 86400000 = 24 h).');
   lines.push('  OCP_AUTO_ACCEPT_TRUST=1');
   lines.push('                       Auto-accept the upstream "Do you trust this folder?"');
   lines.push('                       dialog. Off by default — without this, ocp aborts fast');

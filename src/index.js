@@ -26,7 +26,12 @@ import { runPrintMode } from './print-mode.js';
 const DEFAULT_WARMUP_MS = 2500;
 const DEFAULT_IDLE_MS = 1500;
 const DEFAULT_PRE_IDLE_MS = 8000;
-const DEFAULT_MAX_RESPONSE_MS = 60_000;
+// 24 h. Set high by design: a hard cap that's too low aborts legitimate
+// long-running tool sequences (multi-step WebSearch / WebFetch / Bash
+// rounds), and the in-flight idle/pre-idle silence detectors already
+// stop "actually stuck" runs much earlier. Operators who want a tighter
+// ceiling set OCP_MAX_RESPONSE_MS explicitly.
+const DEFAULT_MAX_RESPONSE_MS = 24 * 60 * 60 * 1000;
 
 // Flags that allow reading arbitrary files, loading untrusted config, granting
 // extra filesystem scope, or bypassing permission gates on the upstream claude

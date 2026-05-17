@@ -221,7 +221,7 @@ When you should skip the daemon:
 | `OCP_WARMUP_MS` / `OCP_REUSE_WARMUP_MS` | Per-spawn / reuse warmup wait | tuned defaults |
 | `OCP_IDLE_MS` / `OCP_PRE_IDLE_MS` | Completion idle thresholds (post-sentinel / silence-only) | `1500` / `8000` |
 | `OCP_FIRST_RESPONSE_MS` | Max wait for first byte after prompt submit | `120000` |
-| `OCP_MAX_RESPONSE_MS` | Per-turn ceiling | `600000` |
+| `OCP_MAX_RESPONSE_MS` | Per-turn hard ceiling in ms. Default is intentionally long because in-flight idle / pre-idle silence detectors already abort genuinely-stuck runs much earlier. | `86400000` (24 h) |
 | `OCP_TRUST_SETTLE_MS` | Pause after dismissing the trust prompt | tuned |
 | `OCP_PROMPT_BOX_WAIT_MS` / `OCP_PROMPT_BOX_SETTLE_MS` | Wait for prompt box / settle after type | tuned |
 | `OCP_AUTO_ACCEPT_TRUST` | Auto-accept the "trust this folder" dialog | `0` |
@@ -324,7 +324,7 @@ const driver = createDriver({
   reuseWarmupMs:  200,          // wait time when reusing from pool (ms)
   idleMs:         1500,         // silence wait after response completes (ms)
   preIdleMs:      8000,         // minimum wait before sentinel matching (ms)
-  maxResponseMs:  60_000,       // maximum response wait (ms), times out if exceeded
+  maxResponseMs:  86_400_000,   // hard timeout (ms), default 24 h (idleMs/preIdleMs abort earlier)
   poolSize:       0,            // PTY pool size (0=disabled, N>0=keep N warmed up)
   poolMaxAgeMs:   600_000,      // maximum pool session lifetime (ms)
   cwd:            process.cwd(), // working directory
@@ -646,7 +646,7 @@ Most-used:
 | `OCP_NO_LIVE=1` | Disable the live spinner on stderr |
 | `OCP_NO_META=1` | Hide the trailing meta footer (`⏱ … · 🔧 …`) |
 | `OCP_NO_DAEMON=1` | Fresh PTY for every call (no warm daemon) |
-| `OCP_MAX_RESPONSE_MS` | Hard timeout, default `60000` |
+| `OCP_MAX_RESPONSE_MS` | Hard timeout in ms, default `86400000` (24 h) |
 | `OCP_FIRST_RESPONSE_MS` | Fail-fast if no progress within N ms after prompt, default `20000` |
 | `OCP_PROMPT_BOX_WAIT_MS` | Max wait for the input chevron, default `15000` (raise for heavy hook/MCP loading) |
 | `OCP_CLAUDE_BIN` | Path to upstream `claude` binary, default `'claude'` |
@@ -655,7 +655,7 @@ Full table (timeouts, pool, daemon, sanitizer escape hatch, etc.):
 [docs/cli-reference.md#environment-variables](./docs/cli-reference.md#environment-variables).
 
 ```bash
-# Increase response timeout to 10 minutes
+# Tighten per-turn timeout to 10 minutes (default is 24 h)
 OCP_MAX_RESPONSE_MS=600000 ocp "Complex task..."
 
 # Single run without daemon

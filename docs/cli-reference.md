@@ -118,7 +118,7 @@ instead of actually using it.
 | `OCP_PROMPT_BOX_WAIT_MS` | `15000` | Max time to wait for the `❯` input chevron after warmup before sending the prompt anyway. Heavy hook / MCP loading may push this past the default; raise if your cwd has many `~/.claude/` integrations. |
 | `OCP_PROMPT_BOX_SETTLE_MS` | `400` | Tiny settle after the chevron lands to avoid racing the cursor blink. |
 | `OCP_FIRST_RESPONSE_MS` | `20000` | Once the prompt is written, max time to wait for a spinner / region-entered event before declaring `interactive-required`. |
-| `OCP_MAX_RESPONSE_MS` | `60000` | Hard timeout for the whole request. |
+| `OCP_MAX_RESPONSE_MS` | `86400000` (24 h) | Hard timeout for the whole request. In-flight idle / pre-idle silence detectors abort genuinely-stuck runs earlier; this is the worst-case ceiling. |
 | `OCP_IDLE_MS` | `1500` | Idle silence threshold for completion after the sentinel has been seen. |
 | `OCP_TRUST_SETTLE_MS` | `5000` | Extra wait after auto-accepting the folder-trust dialog so the TUI can transition to the main prompt box. |
 
