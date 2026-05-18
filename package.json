@@ -13,7 +13,7 @@
     "./pty": "./src/pty/index.js"
   },
   "bin": {
-    "ocp": "./bin/cli.js"
+    "ocp": "bin/cli.js"
   },
   "files": [
     "src",
