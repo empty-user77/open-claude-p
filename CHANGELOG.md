@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.1] — 2026-05-19
+
+Post-1.1.0 fixes driven by Cosmica integration testing. Several of
+these are essentially the 1.1.0 release "actually working" — the
+1.1.0 surface was correct on paper but a handful of subtle parser
+and default-value bugs kept the new behaviour from landing in
+practice.
+
+### Fixed
+
+- **Trust dialog auto-accept regressed silently for two distinct
+  reasons.**
+  - The driver's `❯` chevron pattern matched both the real input
+    box and the trust dialog's "currently-selected" row
+    (`❯ 1. Yes, I trust this folder`). `prompt-box-shown` fired
+    on the dialog row, the await chain proceeded to the prompt
+    write, and the trailing `\r` confirmed whichever option was
+    highlighted — silently dropping the user message. Pattern is
+    now `/^[❯›❮‹](?:$|\s(?!\d+\.\s))/` and a write-time guard
+    refuses to send when `dialogState` is in a blocked state.
+  - The trust dialog text is rendered with cursor-positioning
+    escapes between words rather than real space bytes; after the
+    ANSI strip the buffer reads `Quicksafetycheck` (no spaces) and
+    the `/Quick safety check/i` pattern never matched. Result: the
+    dialog rendered in ~250 ms but the watcher never fired, the
+    driver fell back to writing the prompt after
+    `OCP_PROMPT_BOX_WAIT_MS`, and the trailing CR confirmed "Yes"
+    in the still-open dialog. The watcher now strips ANSI before
+    pattern-matching and the patterns accept `\s*` between every
+    word.
+- **`OCP_PROMPT_BOX_WAIT_MS` default 6 s → 30 s.** Environments
+  with many MCP servers or plugins need 8–25 s before the input
+  box renders. 6 s was tripping the timeout before claude had
+  even shown the trust dialog. Short-circuited the moment
+  `prompt-box-shown` fires, so the common-case latency is
+  unchanged.
+- **`dangerouslySkipPermissions` is now ON by default across
+  EVERY surface** — not just the CLI. The 1.1.0 commit only
+  flipped the CLI's default and left `createDriver().runOneShot()`
+  and `createChatClient()` on the pre-1.1 `false`, so anything
+  using the SDK directly (the bundled sample chat, third-party
+  wrappers) still hung on the first tool call. Sample server's
+  redundant env-gate is dropped accordingly.
+- **End-of-reply marker no longer flagged as
+  "prompt-injection".** The 1.0/1.1 instruction text used the
+  word "token": `Append the literal token ⟦OCP_END:xxx⟧ ...`.
+  The model's safety classifier treated "include this token in
+  your reply" as an access-token / API-key exfiltration attempt
+  and sometimes appended a `prompt injection attempt detected`
+  warning to the user-facing reply. Reworded to "end-of-reply
+  marker" and framed as `ocp wrapper's plumbing` so claude
+  recognises it as harness infrastructure rather than hostile
+  injection.
+
+### Changed
+
+- **postinstall skips the shebang rewrite when running inside a
+  git checkout** (detected by the presence of `.git/` next to
+  `package.json`). The rewrite is meant for end-user installs from
+  the npm tarball; in a dev `git clone + npm link` setup it
+  otherwise overwrote `#!/usr/bin/env node` with the developer's
+  absolute node path on every `npm install` / `npm test`, showing
+  up as a noisy working-tree diff. Consumer installs unaffected.
+
+---
+
 ## [1.1.0] — 2026-05-18
 
 `ocp` 1.1 reshapes the CLI defaults around the assumption that
@@ -189,5 +255,6 @@ Initial release.
   `OCP_NO_DEFAULT_PROMPT=1`).
 - Localised READMEs: Korean, Japanese, Chinese.
 
+[1.1.1]: https://github.com/empty-user77/open-claude-p/releases/tag/v1.1.1
 [1.1.0]: https://github.com/empty-user77/open-claude-p/releases/tag/v1.1.0
 [1.0.0]: https://github.com/empty-user77/open-claude-p/releases/tag/v1.0.0
