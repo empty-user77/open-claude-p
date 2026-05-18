@@ -31,10 +31,13 @@ const chat = createChatClient({
   dbPath: path.join(DATA_DIR, 'conversations.json'),
   skillsDir: path.join(os.homedir(), '.claude', 'skills'),
   // The sample defaults to running tools without permission prompts so
-  // tool calls "just work" — flip via the SAMPLE_ALLOW_TOOLS env var
-  // at startup. Off means each tool call would block on a permission
-  // prompt PTY automation cannot answer.
-  dangerouslySkipPermissions: process.env.SAMPLE_ALLOW_TOOLS === '1',
+  // tool calls (WebSearch, WebFetch, …) just work. PTY automation
+  // cannot answer claude's interactive y/n permission prompts, so
+  // leaving this off means the very first tool call hangs forever.
+  // Opt out (and let claude prompt for every tool) by setting
+  // `SAMPLE_STRICT_PERMS=1` at startup — useful when wiring the demo
+  // up to an untrusted prompt source.
+  dangerouslySkipPermissions: process.env.SAMPLE_STRICT_PERMS !== '1',
   // No `appendSystemPrompt` here — the SDK ships a sensible default
   // for interactive use. If you want to add chat-specific rules on
   // top, pass a string and it will be appended to (not replace) the
