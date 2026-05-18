@@ -170,6 +170,24 @@ describe('tuiFrameParser', () => {
     assert.ok(!r2.events.map((e) => e.type).includes('prompt-box-shown'));
   });
 
+  test('trust-dialog text matches the keyword patterns with or without spaces', () => {
+    // Regression: claude TUI renders the trust dialog with cursor-
+    // positioning escapes ("\x1b[5C") between words rather than real
+    // space bytes, so after the dialog watcher's ANSI strip the buffer
+    // reads `Quicksafetycheck...` (no spaces). The pattern must accept
+    // both the on-wire spaced form AND the post-strip squashed form.
+    const PATTERNS = [
+      /Quick\s*safety\s*check/i,
+      /Is\s*this\s*a\s*project\s*you\s*(?:created|trust)/i,
+      /trust\s*this\s*folder/i,
+    ];
+    // Spaced form (as it visually renders)
+    assert.ok(PATTERNS.some((p) => p.test('Quick safety check: Is this a project you trust?')));
+    // No-space squashed form (post-strip, real observed output)
+    assert.ok(PATTERNS.some((p) => p.test('Quicksafetycheck:Isthisaprojectyoutrust?')));
+    assert.ok(PATTERNS.some((p) => p.test('Doyoutrustthisfolderwithyourcode')));
+  });
+
   test('closes region when sentinel appears on the marker line', () => {
     const p = tuiFrameParser.create();
     const r = p.feed('⏺ apple⟦OCP_END:deadbeef⟧\n');

@@ -163,7 +163,15 @@ class Driver {
       maxEvents: finiteNonNeg(opts.maxEvents, 10_000),
       firstResponseMs: finiteNonNeg(opts.firstResponseMs, numberFromEnv('OCP_FIRST_RESPONSE_MS', 120_000)),
       trustSettleMs: finiteNonNeg(opts.trustSettleMs, numberFromEnv('OCP_TRUST_SETTLE_MS', 2_500)),
-      promptBoxWaitMs: finiteNonNeg(opts.promptBoxWaitMs, numberFromEnv('OCP_PROMPT_BOX_WAIT_MS', 6_000)),
+      // 30 s default: in environments with many MCP servers, plugins,
+      // or hooks the first prompt-box render can take 8–25 s. The pre-
+      // 1.1 default of 6 s caused the driver to give up on
+      // prompt-box-shown and write the prompt anyway, *before* claude
+      // had even shown the trust dialog — the prompt's trailing CR
+      // then confirmed whatever option was highlighted on the dialog
+      // and the user message was dropped. 30 s leaves room for slow
+      // startups while still bounding total spawn latency.
+      promptBoxWaitMs: finiteNonNeg(opts.promptBoxWaitMs, numberFromEnv('OCP_PROMPT_BOX_WAIT_MS', 30_000)),
       initialSessionId: opts.initialSessionId ?? null,
       printMode:
         opts.printMode === true ||
@@ -426,10 +434,16 @@ class Driver {
                           || process.env.OCP_NO_AUTO_ACCEPT_TRUST === 'true'
                           || req.autoAcceptFolderTrust === false;
     const autoAcceptTrust = !autoAcceptOptOut;
+    // The trust dialog text is rendered with cursor-positioning
+    // escapes between words rather than real space bytes. After our
+    // ANSI strip the buffer reads `Quicksafetycheck...` with the
+    // spaces gone, so `/Quick safety check/i` no longer matches.
+    // Allow zero-or-more whitespace between every word and accept
+    // the seq with or without spaces.
     const TRUST_PATTERNS = [
-      /Quick safety check/i,
-      /Is this a project you (?:created|trust)/i,
-      /trust this folder/i,
+      /Quick\s*safety\s*check/i,
+      /Is\s*this\s*a\s*project\s*you\s*(?:created|trust)/i,
+      /trust\s*this\s*folder/i,
     ];
     const TRUST_SETTLE_MS = this.opts.trustSettleMs
                          ?? numberFromEnv('OCP_TRUST_SETTLE_MS')
@@ -439,7 +453,21 @@ class Driver {
 
     const dialogWatchHandler = (chunk) => {
       if (dialogState !== 'none') return;
-      dialogScanBuf += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      // Strip ANSI escapes BEFORE pattern-matching. claude's TUI wraps
+      // the dialog text in color codes mid-word ("\x1b[1mQ\x1b[muick
+      // safety check..."), which prevents a simple `/Quick safety/`
+      // regex from ever matching the raw byte stream. Result observed
+      // in user testing: trust dialog renders in 1-2 s but our
+      // detector never fires, the driver falls back to writing the
+      // user's prompt after `OCP_PROMPT_BOX_WAIT_MS`, and the
+      // trailing `\r` confirms whichever dialog option is highlighted
+      // (silently dropping the user message). Stripping here keeps
+      // the watcher decoupled from the main parser pipeline while
+      // still seeing the plain text claude actually rendered.
+      const raw = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      dialogScanBuf += raw.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+                          .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+                          .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
       if (dialogScanBuf.length > 16384) dialogScanBuf = dialogScanBuf.slice(-8192);
       if (TRUST_PATTERNS.some((p) => p.test(dialogScanBuf))) {
         if (autoAcceptTrust) {
@@ -508,6 +536,27 @@ class Driver {
         promptBoxReadyPromise,
         sleep(PROMPT_BOX_WAIT_MS).then(() => { promptBoxTimeoutHit = true; }),
       ]);
+      // If the dialog watcher is mid-flow (trust just auto-accepted)
+      // when our prompt-box wait times out, claude is still transitioning
+      // from the dialog to the main UI — the chevron has not landed
+      // because it doesn't exist yet. Give it the trust-settle window
+      // plus another bounded wait for the real input box to appear.
+      // Writing now would land the prompt into the dialog (and its
+      // trailing `\r` would confirm whichever option is highlighted),
+      // silently dropping the user's message.
+      if (promptBoxTimeoutHit && !promptBoxReady && dialogState === 'trust-accepted') {
+        const EXTRA_WAIT = PROMPT_BOX_WAIT_MS;
+        this._logDebug(
+          `prompt-box-shown still not seen but trust dialog is processing — ` +
+          `extending wait by ${EXTRA_WAIT}ms`,
+        );
+        let extendedTimeoutHit = false;
+        await Promise.race([
+          promptBoxReadyPromise,
+          sleep(EXTRA_WAIT).then(() => { extendedTimeoutHit = true; }),
+        ]);
+        promptBoxTimeoutHit = extendedTimeoutHit;
+      }
       if (promptBoxTimeoutHit && !promptBoxReady) {
         this._logDebug(`prompt-box-shown not seen within ${PROMPT_BOX_WAIT_MS}ms — sending anyway`);
       } else if (promptBoxReady && PROMPT_BOX_SETTLE_MS > 0) {
@@ -541,7 +590,12 @@ class Driver {
       if (dialogState === 'trust-blocked' || dialogState === 'unknown-blocked') {
         this._logDebug(`skipping prompt write — dialog blocked (${dialogState})`);
       } else try {
+        this._logDebug(
+          `writing prompt: ${fullPrompt.length} chars, ` +
+          `dialogState=${dialogState}, promptBoxReady=${promptBoxReady}`,
+        );
         await writePromptToSession(session, fullPrompt, this.opts);
+        this._logDebug('prompt write returned');
         firstResponseTimer = setTimeout(() => {
           if (!assistantActivitySeen) {
             this._logDebug(`no assistant activity for ${FIRST_RESPONSE_MS}ms — interactive prompt suspected`);
