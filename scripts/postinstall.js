@@ -79,6 +79,23 @@ if (!fixedAny) {
 // and the file extension makes shebang lines a no-op.
 if (process.platform !== 'win32') {
   const here = path.dirname(fileURLToPath(import.meta.url));
+  const repoRoot = path.resolve(here, '..');
+  // Skip the shebang rewrite when this install is a git checkout
+  // (dev environment via `git clone + npm link`, or a contributor
+  // running `npm install` inside the repo). The rewrite would
+  // otherwise overwrite the portable `#!/usr/bin/env node` with the
+  // developer's absolute node path, which then shows up as a noisy
+  // working-tree diff on every commit and risks getting committed
+  // by mistake. Consumers installing from the npm tarball never
+  // have a `.git/` so they still get the GUI-launch fix.
+  try {
+    const st = await lstat(path.join(repoRoot, '.git'));
+    if (st.isDirectory() || st.isFile()) {
+      process.stdout.write('postinstall: detected git checkout — skipping shebang rewrite\n');
+      process.exit(0);
+    }
+  } catch { /* no .git/ — npm-tarball install, proceed */ }
+
   // Every shipped bin entry needs the same shebang treatment. List them
   // here rather than re-reading package.json (the file may be pruned
   // from production installs and the bin field is small enough to
