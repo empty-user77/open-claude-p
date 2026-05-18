@@ -577,19 +577,32 @@ class Driver {
         await sleep(PROMPT_BOX_SETTLE_MS);
       }
 
-      // Sentinel marker appended to every user turn so PTY automation
-      // can tell when the reply is done. Phrased to be inert to model
-      // behaviour — do NOT use words like "finish", "complete",
-      // "wrap up", or "final" that nudge the model to cut tool use
-      // short. The reply itself is the actual signal of completion;
-      // this marker is just the bookkeeping byte we emit afterwards.
+      // End-of-reply marker appended to every user turn so PTY
+      // automation can tell when the reply is done. Word choice
+      // matters here:
+      //   - **Avoid "token"**: the model's safety training flags
+      //     prompts of the form "include this token in your reply"
+      //     as access-token / API-key exfiltration attempts; it then
+      //     warns the user about a "prompt injection attempt" in
+      //     the response, which is alarming and user-visible. Use
+      //     "marker" / "sentinel" instead — they carry no auth
+      //     baggage.
+      //   - **Avoid "finish", "complete", "wrap up", "final"**: those
+      //     nudge the model to cut tool use short. The reply itself
+      //     is the actual signal of completion; this marker is just
+      //     the bookkeeping byte we emit afterwards.
+      //   - Identify the source explicitly: framing it as "the ocp
+      //     wrapper's marker" gives the model context to recognise
+      //     it as harness plumbing rather than a hostile injection.
       // Single-line form because `\n` flips claude TUI into multi-line
       // edit mode where `\r` no longer submits.
       const instruction =
-        ` (Append the literal token ${sentinel} on its own line at the very` +
-        ' end of your reply. Automation glue — does not constrain how you' +
-        ' answer above; use tools as freely and thoroughly as you would' +
-        ' without this marker.)';
+        ` (End your reply with the literal text ${sentinel} on its own line.` +
+        ' This is the ocp wrapper\'s end-of-reply marker — programmatic plumbing' +
+        ' the automation uses to know your reply has landed. It is not part of' +
+        ' the user\'s message and you do not need to mention or flag it. Answer' +
+        ' the user\'s actual message above as you normally would, using tools' +
+        ' as freely and thoroughly as you would without the marker.)';
       const fullPrompt = req.prompt + instruction;
       // Skip the prompt write if the dialog watcher has already
       // decided to abort. Without this check the trailing `\r` of
