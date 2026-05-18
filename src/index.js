@@ -9,7 +9,7 @@
 // output formats.
 
 import { randomBytes } from 'node:crypto';
-import { readdir, stat } from 'node:fs/promises';
+import { readdir, stat, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -408,15 +408,24 @@ class Driver {
     // Interactive-dialog watcher. The upstream claude TUI can ask
     // questions that block prompt input — most commonly the "Quick safety
     // check: Is this a project you trust?" folder-trust dialog when the
-    // cwd has never been confirmed. PTY automation cannot answer these
-    // unless we recognise the dialog. We auto-accept folder-trust ONLY
-    // when explicitly opted in (OCP_AUTO_ACCEPT_TRUST=1 or req
-    // .autoAcceptFolderTrust); otherwise we abort fast with a clear
-    // completion reason rather than letting the user stare at a silent
-    // timeout. Unknown dialogs short-circuit with `interactive-required`
-    // so the CLI can surface an actionable error.
-    const autoAcceptTrust = process.env.OCP_AUTO_ACCEPT_TRUST === '1'
-                         || req.autoAcceptFolderTrust === true;
+    // cwd has never been confirmed.
+    //
+    // Auto-accept is the DEFAULT in 1.1+. Rationale: `ocp` is a non-
+    // interactive PTY automation surface. A dialog that needs a human
+    // y/n cannot be answered by a calling app — leaving it un-accepted
+    // means every call into a fresh cwd aborts on `trust-required` and
+    // the only available action is "go run `claude` manually once".
+    // For a tool whose entire job is to make claude callable from
+    // scripts and apps, that is the wrong default.
+    //
+    // Opt out with `OCP_NO_AUTO_ACCEPT_TRUST=1` (env, takes precedence)
+    // or `req.autoAcceptFolderTrust === false` (per-request, explicit).
+    // When opted out, we abort fast with `trust-required` so the
+    // caller gets an actionable error instead of a silent timeout.
+    const autoAcceptOptOut = process.env.OCP_NO_AUTO_ACCEPT_TRUST === '1'
+                          || process.env.OCP_NO_AUTO_ACCEPT_TRUST === 'true'
+                          || req.autoAcceptFolderTrust === false;
+    const autoAcceptTrust = !autoAcceptOptOut;
     const TRUST_PATTERNS = [
       /Quick safety check/i,
       /Is this a project you (?:created|trust)/i,
@@ -520,9 +529,9 @@ class Driver {
         ' end of your reply. Automation glue — does not constrain how you' +
         ' answer above; use tools as freely and thoroughly as you would' +
         ' without this marker.)';
+      const fullPrompt = req.prompt + instruction;
       try {
-        session.write(req.prompt + instruction);
-        session.write('\r');
+        await writePromptToSession(session, fullPrompt, this.opts);
         firstResponseTimer = setTimeout(() => {
           if (!assistantActivitySeen) {
             this._logDebug(`no assistant activity for ${FIRST_RESPONSE_MS}ms — interactive prompt suspected`);
@@ -607,14 +616,60 @@ class Driver {
       }
     }
 
-    // Buffer-scan is primary: finds text between the LAST ⏺ marker and the
-    // LAST sentinel occurrence, which is always Claude's complete final
-    // response regardless of how many partial re-renders the TUI produced.
-    // Event-based extraction is the fallback (used when the buffer scan finds
-    // nothing, e.g. if the PTY session was too short to accumulate a sentinel).
-    const text =
+    // PTY-extracted text is what we used to return as `text`. Keep it
+    // as a fallback — it's our only option when the upstream JSONL is
+    // disabled (`--no-session-persistence`), unavailable, or hasn't
+    // flushed in time. But prefer the JSONL when present: it is the
+    // upstream's own authoritative store of the assistant message,
+    // with no PTY chrome, HUD plugins, statusline interleaving, or
+    // `[Pasted text #N]` echoes mixed in.
+    const ptyText =
       extractAssistantText(strippedBuffer, nonce) ||
       extractAssistantTextFromEvents(events);
+
+    // JSONL-first extraction. Claude writes the completed assistant
+    // turn to `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`
+    // as soon as the response finishes; reading from that file gives
+    // us a clean markdown string that no PTY parser can ever match.
+    // Skipped when noSessionPersistence is set (the file is never
+    // written) or when we never captured a sessionId.
+    let jsonlExtraction = null;
+    if (capturedSessionId && req.noSessionPersistence !== true) {
+      try {
+        const { readSessionText } = await import('./chat/index.js');
+        jsonlExtraction = await readSessionText(
+          capturedSessionId,
+          startTime,
+          cwd,
+        );
+      } catch (e) {
+        this._logDebug(`JSONL read failed: ${e.message}`);
+      }
+    }
+
+    let text = jsonlExtraction?.text || ptyText;
+    let effectiveCompletion = completion.reason;
+    let effectiveIsError = completion.isError;
+    let recoveredFromJsonl = false;
+
+    // False-positive abort recovery. The PTY-side first-response
+    // watchdog fires when no `⏺` / spinner is seen within
+    // `OCP_FIRST_RESPONSE_MS`. Some legitimate runs cross that
+    // threshold — heavy MCP/plugin loading, cold-cwd warmup, a slow
+    // first-token. If the upstream nevertheless completed its turn
+    // and flushed the response to JSONL, the abort was a timing
+    // artifact, not a real stall. Promote to success when JSONL
+    // proves the response actually landed.
+    const stalledReasons = new Set(['interactive-required', 'trust-required', 'timeout']);
+    if (stalledReasons.has(completion.reason) && jsonlExtraction?.text) {
+      this._logDebug(
+        `JSONL recovered from completion=${completion.reason} ` +
+        `(${jsonlExtraction.text.length} chars) — treating as success`,
+      );
+      effectiveCompletion = 'jsonl-recovered';
+      effectiveIsError = false;
+      recoveredFromJsonl = true;
+    }
 
     if (this.opts.debug) {
       const marker = TUI_PATTERNS.assistantRegionMarker;
@@ -625,17 +680,19 @@ class Driver {
         `stripLen=${strippedBuffer.length} ` +
         `sentinelEvents=${events.filter(e=>e.type==='sentinel').length} ` +
         `assistantText=${events.filter(e=>e.type==='assistant-text').length} ` +
-        `sid=${capturedSessionId}`,
+        `sid=${capturedSessionId} ` +
+        `source=${jsonlExtraction?.text ? 'jsonl' : 'pty'} ` +
+        `recovered=${recoveredFromJsonl}`,
       );
     }
 
     // For stall-style failures, capture the tail of the stripped PTY
     // buffer so the caller can see exactly what claude was rendering
     // when we gave up — that is usually the dialog or error that the
-    // user needs to act on manually.
-    const stalledReasons = new Set(['interactive-required', 'trust-required', 'timeout']);
+    // user needs to act on manually. Skip when JSONL already gave us
+    // a real response (the "stall" was a false positive).
     let stalledOutputTail;
-    if (stalledReasons.has(completion.reason)) {
+    if (stalledReasons.has(effectiveCompletion)) {
       stalledOutputTail = strippedBuffer
         .split('\n')
         .map((l) => l.replace(/\s+$/, ''))
@@ -648,12 +705,20 @@ class Driver {
       sessionId: capturedSessionId,
       text,
       events,
-      exitCode: completion.isError ? 1 : 0,
-      isError: completion.isError,
-      completionReason: completion.reason,
+      exitCode: effectiveIsError ? 1 : 0,
+      isError: effectiveIsError,
+      completionReason: effectiveCompletion,
       cost: { totalUsd: null, numTurns: null },
       durationMs: Date.now() - startTime,
-      diagnostics: { rawBytes, strippedBytes: strippedBuffer.length, stalledOutputTail, eventsTruncated, strippedTruncated },
+      diagnostics: {
+        rawBytes,
+        strippedBytes: strippedBuffer.length,
+        stalledOutputTail,
+        eventsTruncated,
+        strippedTruncated,
+        textSource: jsonlExtraction?.text ? 'jsonl' : 'pty',
+        recoveredFromJsonl,
+      },
     };
   }
 
@@ -700,6 +765,118 @@ function finiteNonNeg(v, fallback) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Resolve a cwd the same way `claude` does when building its session
+ * directory under `~/.claude/projects/`: follow symlinks so callers
+ * passing paths under `/var/folders/`, `/tmp/`, etc. on macOS land in
+ * the matching `/private/<…>` directory. Falls back to a string
+ * resolve when the path no longer exists (e.g. between turns the cwd
+ * was deleted) — the lookup will simply miss and the caller falls
+ * back to its own null-handling path.
+ *
+ * @param {string|undefined} cwd
+ * @returns {Promise<string>}
+ */
+async function canonicalCwd(cwd) {
+  const abs = path.resolve(cwd ?? process.cwd());
+  try {
+    return await realpath(abs);
+  } catch {
+    return abs;
+  }
+}
+
+/**
+ * Write a prompt to the PTY in a way that the upstream TUI will accept
+ * and submit reliably even for multi-kilobyte payloads.
+ *
+ * Why this exists: a single `session.write(big)` followed by
+ * `session.write('\r')` races claude's input handler. For large prompts
+ * (Cosmica's RAG-injected ~3 KB), the TUI's paste detector grouped the
+ * bytes into one or more `[Pasted text #N +X lines]` blocks and our
+ * trailing `\r` was consumed as paste content rather than a submit —
+ * the prompt sat in the input box, no `⏺` ever appeared, and the
+ * first-response watchdog fired `interactive-required` 20 s later.
+ *
+ * Strategy:
+ *
+ *   - small prompts: write atomically and submit immediately
+ *     (unchanged from pre-1.1 behaviour — keeps small-turn latency)
+ *   - large prompts (`OCP_PASTE_MODE=auto` and length > threshold):
+ *     write in chunks with brief inter-chunk delays so claude's auto-
+ *     paste detector either treats each chunk as a separate typed
+ *     burst or coalesces cleanly, then a settle delay before the
+ *     `\r` submit so the input box has time to redraw
+ *   - `OCP_PASTE_MODE=bracket`: wrap the payload in xterm bracketed-
+ *     paste markers (`\x1b[200~ … \x1b[201~`). Modern TUIs treat the
+ *     enclosed bytes as a single paste with explicit boundaries; the
+ *     trailing `\r` lands outside the paste so it submits cleanly.
+ *   - `OCP_PASTE_MODE=raw`: pre-1.1 behaviour (atomic write + `\r`).
+ *     Escape hatch for environments where the new path regresses.
+ *
+ * @param {{ write: (s: string) => void }} session
+ * @param {string} content
+ * @param {object} opts  Driver options (chunk size / delays optional)
+ */
+export async function writePromptToSession(session, content, opts = {}) {
+  const mode = opts.pasteMode
+            ?? process.env.OCP_PASTE_MODE
+            ?? 'auto';
+  const threshold = opts.pasteThreshold
+                 ?? numberFromEnv('OCP_PASTE_THRESHOLD')
+                 ?? 1024;
+  const settleMs = opts.submitSettleMs
+                ?? numberFromEnv('OCP_SUBMIT_SETTLE_MS')
+                ?? 50;
+
+  if (mode === 'raw') {
+    session.write(content);
+    session.write('\r');
+    return;
+  }
+
+  if (mode === 'bracket') {
+    session.write('\x1b[200~' + content + '\x1b[201~');
+    if (settleMs > 0) await sleep(settleMs);
+    session.write('\r');
+    return;
+  }
+
+  // `auto` (default) and `chunk` share the chunked-write path; `chunk`
+  // forces it regardless of size, `auto` only kicks in above threshold.
+  const useChunk = mode === 'chunk' || (mode === 'auto' && content.length > threshold);
+  if (!useChunk) {
+    session.write(content);
+    session.write('\r');
+    return;
+  }
+
+  const chunkChars = opts.pasteChunkChars
+                  ?? numberFromEnv('OCP_PASTE_CHUNK_CHARS')
+                  ?? 256;
+  const chunkDelay = opts.pasteChunkDelayMs
+                  ?? numberFromEnv('OCP_PASTE_CHUNK_DELAY_MS')
+                  ?? 18;
+
+  let i = 0;
+  while (i < content.length) {
+    let end = Math.min(i + chunkChars, content.length);
+    // Don't split a surrogate pair across writes. JS strings are UTF-16
+    // and most non-BMP code points (emoji, some CJK extensions) live as
+    // pairs — splitting one yields two unpaired halves and the upstream
+    // would render replacement glyphs.
+    if (end < content.length) {
+      const code = content.charCodeAt(end - 1);
+      if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+    }
+    session.write(content.slice(i, end));
+    i = end;
+    if (i < content.length && chunkDelay > 0) await sleep(chunkDelay);
+  }
+  if (settleMs > 0) await sleep(settleMs);
+  session.write('\r');
 }
 
 /**
@@ -750,11 +927,14 @@ function fieldNameOf(spec) {
  * @returns {Promise<Map<string, number>>}  filename -> previous mtimeMs
  */
 async function listSessionFiles(cwd) {
-  const absCwd = path.resolve(cwd ?? process.cwd());
   // Upstream encodes BOTH `/` and `_` as `-`, so a cwd containing
   // underscores (`gen_keypair`) maps to `gen-keypair`. The `/`-only
   // replacement silently looks in the wrong dir for those projects.
-  const encoded = absCwd.replace(/[/_]/g, '-');
+  // Also realpath() to follow macOS `/var` -> `/private/var` symlinks
+  // — `claude` resolves symlinks when building its own JSONL dir, so
+  // a string-only `path.resolve` here looks up the wrong project
+  // directory and we miss every existing session file.
+  const encoded = (await canonicalCwd(cwd)).replace(/[/_]/g, '-');
   const dir = path.join(os.homedir(), '.claude', 'projects', encoded);
   const out = new Map();
   let entries;
@@ -788,11 +968,10 @@ async function listSessionFiles(cwd) {
  * @returns {Promise<string|null>}
  */
 async function findRecentSessionId(cwd, since, before) {
-  const absCwd = path.resolve(cwd ?? process.cwd());
-  // Upstream encodes BOTH `/` and `_` as `-`, so a cwd containing
-  // underscores (`gen_keypair`) maps to `gen-keypair`. The `/`-only
-  // replacement silently looks in the wrong dir for those projects.
-  const encoded = absCwd.replace(/[/_]/g, '-');
+  // See listSessionFiles for the rationale on realpath + the `/_` -> `-`
+  // mapping. Both helpers must agree, or the "did this file exist
+  // before our request?" comparison silently misses every entry.
+  const encoded = (await canonicalCwd(cwd)).replace(/[/_]/g, '-');
   const dir = path.join(os.homedir(), '.claude', 'projects', encoded);
   let entries;
   try { entries = await readdir(dir); } catch { return null; }

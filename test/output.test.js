@@ -53,6 +53,23 @@ describe('textOutputAdapter', () => {
     a.onEvent({ type: 'assistant-text', text: 'should not write' });
     assert.equal(sink.text, '');
   });
+
+  for (const reason of [
+    'timeout', 'interactive-required', 'trust-required',
+    'cancelled', 'write-failed', 'upstream-exited',
+  ]) {
+    test(`writes nothing on stdout when completionReason=${reason}`, () => {
+      const sink = captureSink();
+      const a = textOutputAdapter.create({}, sink);
+      // `text` here is the PTY back-echo that would otherwise leak.
+      a.end({
+        text: '[Pasted text #1 +21 lines]\n❯ Try refactor <filepath>',
+        isError: true,
+        completionReason: reason,
+      });
+      assert.equal(sink.text, '');
+    });
+  }
 });
 
 // ── json ───────────────────────────────────────────────────────────────
@@ -190,5 +207,35 @@ describe('streamJsonOutputAdapter', () => {
     a.onEvent({ type: 'sentinel', nonce: 'x' });
     a.onEvent({ type: 'spinner', label: 'thinking' });
     assert.equal(sink.text, ''); // nothing emitted
+  });
+
+  for (const reason of [
+    'timeout', 'interactive-required', 'trust-required',
+    'cancelled', 'write-failed', 'upstream-exited',
+  ]) {
+    test(`suppresses assistant frame on abort completionReason=${reason}`, () => {
+      const sink = captureSink();
+      const a = streamJsonOutputAdapter.create({}, sink);
+      a.end({
+        // PTY back-echo that would tease a consumer into rendering this
+        // as the model's reply if the adapter emitted it.
+        text: '[Pasted text #1 +21 lines]',
+        isError: true,
+        completionReason: reason,
+      });
+      const types = sink.jsonLines.map((o) => o.type);
+      assert.deepEqual(types, ['system', 'result']);
+      const result = sink.jsonLines.find((o) => o.type === 'result');
+      assert.equal(result.subtype, 'error');
+      assert.equal(result.completion, reason);
+    });
+  }
+
+  test('successful turn still emits the assistant frame', () => {
+    const sink = captureSink();
+    const a = streamJsonOutputAdapter.create({}, sink);
+    a.end({ text: 'the answer', isError: false, completionReason: 'sentinel' });
+    const types = sink.jsonLines.map((o) => o.type);
+    assert.deepEqual(types, ['system', 'assistant', 'result']);
   });
 });

@@ -1,22 +1,29 @@
 #!/usr/bin/env node
 //
-// Postinstall fixup for node-pty prebuilds.
+// Postinstall fixup for two macOS-and-friends gotchas:
 //
-// npm sometimes drops the execute bit on prebuilt helper binaries during tar
-// extraction. node-pty ships a `spawn-helper` per (platform, arch) that MUST
-// be executable; without the +x bit every `posix_spawnp` call fails on macOS
-// with the unhelpful message "posix_spawnp failed.".
+//   1. node-pty prebuild execute bit. npm sometimes drops +x on the
+//      `spawn-helper` binary during tar extraction; without it every
+//      `posix_spawnp` call fails with "posix_spawnp failed.".
 //
-// This script restores the execute bit for whichever prebuild matches the
-// current platform/arch. It is a no-op everywhere else.
+//   2. Shebang line in `bin/cli.js`. The shipped file uses
+//      `#!/usr/bin/env node`, which fails the moment ocp is spawned
+//      from a process that does not inherit the user's shell PATH —
+//      the canonical case is a macOS GUI app (Electron / Tauri / native
+//      Cocoa) that gets launchd's default `/usr/bin:/bin:/usr/sbin:/sbin`
+//      with no nvm/homebrew/asdf bin dir, so `env: node: No such file
+//      or directory` aborts before our code runs. We rewrite the
+//      shebang to `process.execPath` — the absolute path of the node
+//      binary that did the install — so GUI launches keep working.
 //
 // Safe to run repeatedly; safe to fail (e.g. when node-pty is not installed
 // yet in some lifecycle ordering).
 
-import { chmod, lstat } from 'node:fs/promises';
+import { chmod, lstat, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
 // Resolve via `require.resolve` against THIS script's location, not
 // process.cwd(). The npm-install case happens to use cwd = package
@@ -56,5 +63,48 @@ for (const full of targets) {
 if (!fixedAny) {
   // Quiet success: in some environments (Windows, or pruned installs) none of
   // the targets exist; that is not an error.
-  process.exit(0);
+}
+
+// ── Shebang fixup for GUI-app launches ──────────────────────────────────
+// Resolve `bin/cli.js` relative to this script's location, then rewrite
+// the first line from `#!/usr/bin/env node` to `#!<absolute path to
+// node>`. The absolute path comes from `process.execPath`, i.e. the
+// node binary that is running this very postinstall — so whichever
+// node was used for `npm install -g open-claude-p` is the one that
+// will run the CLI later. This is the standard fix for CLIs that need
+// to be invokable from launchd-managed GUI apps on macOS without the
+// user's shell PATH.
+//
+// Skipped on Windows: the npm-cmd shim handles node resolution there
+// and the file extension makes shebang lines a no-op.
+if (process.platform !== 'win32') {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  // Every shipped bin entry needs the same shebang treatment. List them
+  // here rather than re-reading package.json (the file may be pruned
+  // from production installs and the bin field is small enough to
+  // mirror inline).
+  const binFiles = [
+    path.resolve(here, '..', 'bin', 'cli.js'),
+    path.resolve(here, '..', 'bin', 'ocp-sample.js'),
+  ];
+  const wantedLine = `#!${process.execPath}`;
+  for (const binPath of binFiles) {
+    try {
+      const original = await readFile(binPath, 'utf8');
+      const firstNl = original.indexOf('\n');
+      if (firstNl <= 0) continue;
+      const currentShebang = original.slice(0, firstNl);
+      if (!currentShebang.startsWith('#!') || currentShebang === wantedLine) continue;
+      const patched = wantedLine + original.slice(firstNl);
+      // chmod restores +x in case the rewrite normalised mode bits.
+      await writeFile(binPath, patched);
+      await chmod(binPath, 0o755);
+      process.stdout.write(`postinstall: rewrote shebang in ${binPath} -> ${wantedLine}\n`);
+    } catch (e) {
+      // Non-fatal: a CLI launched from a shell with node in PATH still
+      // works with the original `#!/usr/bin/env node`. Only the GUI-app
+      // case regresses, which is the pre-1.1 behaviour.
+      process.stdout.write(`postinstall: shebang fixup skipped for ${binPath} (${e?.code || e?.message || e})\n`);
+    }
+  }
 }

@@ -537,6 +537,12 @@ export function createChatClient(opts = {}) {
   }
   const driver = opts.driver ?? createDriver(opts.driverOpts ?? {});
   const ownsDriver = !opts.driver;
+  // Cache the driver's cwd so chat.send can pass it through to
+  // readSessionText. Without this, every readSessionText call defaults
+  // to `process.cwd()` and misses the JSONL files for any driver that
+  // was constructed with a non-default cwd (tests, CLI invocations
+  // with --cwd, integrations that pin a project root).
+  const sessionCwd = opts.driverOpts?.cwd ?? opts.cwd ?? process.cwd();
 
   // Best-effort cleanup of stale `<dbPath>.<pid>.<ts>.tmp` leftovers
   // from crashed saveDB calls. Runs at most once per process per dbPath.
@@ -1012,7 +1018,7 @@ export function createChatClient(opts = {}) {
       // PTY-extracted text — the JSONL has real hyperlinks and no TUI
       // artifacts. Fall back to the buffer-scanned text if the JSONL is
       // unavailable (e.g. session id never landed).
-      const sessionRead = await readSessionText(result.sessionId, t0);
+      const sessionRead = await readSessionText(result.sessionId, t0, sessionCwd);
       const finalText = sessionRead?.text
         || cleanResponse(result.text || streamed)
         || '';
@@ -1084,7 +1090,26 @@ export async function readSessionText(sessionId, t0 = 0, cwd = process.cwd()) {
   // `/Users/alice/gen_keypair` lands in `-Users-alice-gen-keypair/`. The
   // earlier "slash-only" version missed any cwd containing `_` and
   // silently fell back to the raw PTY text.
-  const cwdKey = path.resolve(cwd).replace(/[/_]/g, '-');
+  //
+  // realpath() before encoding: on macOS `/var`, `/tmp`, and several
+  // others are symlinks into `/private/<…>`. `claude` itself resolves
+  // symlinks when it builds its own JSONL path (so a session in
+  // `/tmp/foo` lands under `~/.claude/projects/-private-tmp-foo/`),
+  // and `path.resolve` is a STRING operation that does not. Without
+  // matching that resolution here, every chat session in a temp
+  // directory looks up the wrong project dir and gets back null —
+  // pushing chat.send onto the PTY-extracted fallback even though
+  // the upstream stored a clean response on disk.
+  let resolvedCwd;
+  try {
+    resolvedCwd = await realpath(path.resolve(cwd));
+  } catch {
+    // The cwd may have been deleted between turns; fall back to the
+    // string-resolved form rather than throwing — the lookup will
+    // miss and the caller's own fallback handles it.
+    resolvedCwd = path.resolve(cwd);
+  }
+  const cwdKey = resolvedCwd.replace(/[/_]/g, '-');
   const projectDir = path.join(os.homedir(), '.claude', 'projects', cwdKey);
 
   async function extractFromFile(filePath, minTimestampMs) {
@@ -1154,6 +1179,16 @@ export async function readSessionText(sessionId, t0 = 0, cwd = process.cwd()) {
   if (sessionId) {
     const r = await extractFromFile(path.join(projectDir, `${sessionId}.jsonl`), t0);
     if (r) return r;
+    // STRICT: when the caller provided a sessionId, do NOT scan
+    // neighbouring JSONL files. The scan picks the most-recently-
+    // modified file in `<projectDir>/`, which under concurrent load
+    // (another claude session active in the same cwd, an editor's
+    // built-in agent, …) is somebody else's transcript. Returning
+    // their text here makes chat.send leak unrelated content as the
+    // "model's response". The caller falls back to PTY-extracted
+    // text or `streamed` on its own; that path is bounded to this
+    // request's session.
+    return null;
   }
 
   let files;
@@ -1203,20 +1238,73 @@ export async function readSessionText(sessionId, t0 = 0, cwd = process.cwd()) {
  * @param {string} text
  * @returns {string}
  */
+// Patterns matching TUI chrome / HUD plugin output that the PTY
+// parser sometimes leaks into the extracted assistant text. Each
+// pattern is line-anchored: a line matching the pattern is dropped
+// entirely. They are intentionally exported so future extractors
+// (or downstream callers writing their own scrubbers) can reuse the
+// list; do NOT extend with substring patterns that could match
+// genuine prose — use TUI_CHROME_INLINE_PATTERNS below for those.
+export const TUI_CHROME_PATTERNS = [
+  // Input chevron alone on a line — the upstream prompt-box affordance.
+  /^[❯›❮‹]\s*$/,
+  // Box / panel borders.
+  /^─{5,}/,
+  // Statusline cells like `[Sonnet 4.6] │ ProjectName` / `[Sonnet 4.6] | ...`.
+  /^\[.*\]\s*[│|]/,
+  // Context meter row: `Context ░░░░░░░░░░ 0%`.
+  /^Context\s/,
+  // Mode / fast-mode indicator (`⏵⏵ bypass permissions on …`).
+  /^⏵/,
+  // Reasoning indicator (`◉ High effort …`).
+  /^◉\s/,
+  // `paste again to expand` hint from claude TUI when a paste was
+  // received but not yet expanded into the input box.
+  /^paste again to expand\s*$/i,
+  // `[Pasted text #N +M lines]` placeholders.
+  /^\[Pasted text\s*#\d+/i,
+];
+
+// Patterns matching TUI chrome that the parser sometimes coalesces
+// INTO the middle of a real content line ("SQLite Pros 6 rules |
+// 2 MCPs | 4 hooks - Zero-config…"). These must NOT drop the whole
+// line — only the matched fragment. Order matters: longer / more
+// specific variants first so the shorter ones don't partial-match.
+export const TUI_CHROME_INLINE_PATTERNS = [
+  /\s*\d+\s+CLAUDE\.md\s*\|\s*\d+\s+rules?\s*\|\s*\d+\s+MCPs?\s*\|\s*\d+\s+hooks?/gi,
+  /\s*\d+\s+rules?\s*\|\s*\d+\s+MCPs?\s*\|\s*\d+\s+hooks?/gi,
+  /\s*\d+\s+MCP servers?\s+need(?:s)?\s+auth\s*·\s*\/mcp/gi,
+  /\s*auto mode unavailable for this model/gi,
+];
+
+/**
+ * Strip TUI chrome from a captured response string. Used as the
+ * LAST-line of defence when the upstream JSONL was not available
+ * and we had to fall back to PTY-extracted text — claude's JSONL is
+ * always clean.
+ *
+ * @param {string} text
+ */
 export function cleanResponse(text) {
   return String(text ?? '')
     .replace(/\r/g, '\n')
     .split('\n')
     .map((l) => l.trimEnd())
     .filter((line) => {
-      const t = line.trim();
-      if (/^[❯›❮‹]\s*$/.test(t)) return false;
-      if (/^─{5,}/.test(t)) return false;
-      if (/^\[.*\]\s*[│|]/.test(t)) return false;
-      if (/^Context\s/.test(t)) return false;
-      if (/^⏵/.test(t)) return false;
-      if (/^◉\s/.test(t)) return false;
+      // Line-anchored patterns only — these drop the entire line.
+      // Inline fragments are stripped below with `map+replace` so
+      // the surrounding content survives.
+      for (const re of TUI_CHROME_PATTERNS) {
+        if (re.test(line) || re.test(line.trim())) return false;
+      }
       return true;
+    })
+    .map((line) => {
+      let out = line;
+      for (const re of TUI_CHROME_INLINE_PATTERNS) {
+        out = out.replace(re, ' ');
+      }
+      return out;
     })
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')

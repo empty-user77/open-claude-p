@@ -19,7 +19,7 @@
 //     MCP servers should stay on the default path
 
 import { spawn } from 'node:child_process';
-import { readdir, stat } from 'node:fs/promises';
+import { readdir, stat, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -180,11 +180,16 @@ function extractSessionIdFromOutput(text, outputFormat) {
 }
 
 async function listSessionFiles(cwd) {
-  const absCwd = path.resolve(cwd ?? process.cwd());
   // Upstream encodes BOTH path separators and underscores as `-`, so
   // `/Users/alice/gen_keypair` lands in `-Users-alice-gen-keypair/`.
   // A `/`-only replacement misses any cwd containing `_` and silently
-  // looks in the wrong directory.
+  // looks in the wrong directory. Additionally, realpath() to follow
+  // macOS `/var` -> `/private/var` so a cwd under `/tmp` resolves to
+  // the same path `claude` writes to (`-private-tmp-<…>`), not the
+  // mismatched `-tmp-<…>`.
+  const abs = path.resolve(cwd ?? process.cwd());
+  let absCwd;
+  try { absCwd = await realpath(abs); } catch { absCwd = abs; }
   const encoded = absCwd.replace(/[/_]/g, '-');
   const dir = path.join(os.homedir(), '.claude', 'projects', encoded);
   const out = new Map();

@@ -11,9 +11,14 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 // One `import { createChatClient } from 'open-claude-p/chat'` is all an
-// external project needs. The sample uses a relative path so it can
-// exercise the bundled source during development.
-import { createChatClient, cleanSpinnerLabel, isAssistantTextNoise } from '../src/chat/index.js';
+// external project needs. The in-repo dev flow uses the same public
+// import: sample/package.json declares `"open-claude-p": "file:.."`
+// so `cd sample && npm install` symlinks `node_modules/open-claude-p`
+// to the repo root and this import resolves through that. The
+// `ocp-sample init` companion CLI rewrites the file: spec to a
+// real semver range when copying the sample out as a standalone
+// project.
+import { createChatClient, cleanSpinnerLabel, isAssistantTextNoise } from 'open-claude-p/chat';
 
 const __dirname   = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR    = path.join(__dirname, 'data');

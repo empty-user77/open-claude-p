@@ -1,6 +1,6 @@
 {
   "name": "open-claude-p",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A PTY-backed compatibility shim for `claude -p` (Claude Code headless/print mode). Drives the interactive `claude` CLI via node-pty and exposes the same option surface and stream-json contract. Ships as both a library and an `ocp` CLI binary.",
   "type": "module",
   "main": "./src/index.js",
@@ -13,7 +13,8 @@
     "./pty": "./src/pty/index.js"
   },
   "bin": {
-    "ocp": "bin/cli.js"
+    "ocp": "bin/cli.js",
+    "ocp-sample": "bin/ocp-sample.js"
   },
   "files": [
     "src",
@@ -23,6 +24,7 @@
     "README.ko.md",
     "README.ja.md",
     "README.zh.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {

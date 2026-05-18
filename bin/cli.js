@@ -43,6 +43,7 @@ import { jsonOutputAdapter } from '../src/output/json.js';
 import { streamJsonOutputAdapter } from '../src/output/stream-json.js';
 import { stripTerminalControl } from '../src/chat/event-filters.js';
 import { DEFAULT_APPEND_SYSTEM_PROMPT } from '../src/chat/index.js';
+import { detectStallCause } from '../src/diagnostics/stall-cause.js';
 import { isatty } from 'node:tty';
 import readline from 'node:readline';
 
@@ -81,16 +82,37 @@ async function main() {
     return EXIT.OK;
   }
 
-  // CLI-only default: when the user has not explicitly set
-  // `--dangerously-skip-permissions`, honour the `OCP_DEFAULT_SKIP_PERMS=1`
-  // env. Rationale — `ocp` is a non-interactive automation surface; a
-  // permission prompt that wants a human answer makes most prompts
-  // (WebSearch, Bash, Read, Write) silently no-op since PTY automation
-  // cannot answer. Library callers via `createDriver()` retain the safer
-  // default (`false`) — this opt-in only changes the CLI default.
-  if (options['dangerously-skip-permissions'] !== true
-   && process.env.OCP_DEFAULT_SKIP_PERMS === '1') {
+  // CLI default in 1.1+: `--dangerously-skip-permissions` is ON unless
+  // the user opts out via `OCP_NO_SKIP_PERMS=1` (env) or explicitly
+  // passes `--dangerously-skip-permissions=false`.
+  //
+  // Rationale — `ocp` is a non-interactive PTY automation surface; a
+  // permission prompt that wants a human y/n makes every tool (Bash,
+  // Edit, Write, MCP, …) hang forever, since the headless driver can't
+  // answer. For a tool whose entire job is "make claude usable from
+  // scripts and apps", refusing tool use by default is the wrong
+  // tradeoff. Library callers via `createDriver()` / `createChatClient()`
+  // retain the safer default (`false`) — this flip only changes the
+  // CLI default. The opt-in `OCP_DEFAULT_SKIP_PERMS=1` from 1.0 is
+  // still honoured but is now a no-op (the default already matches it).
+  const skipPermsOptOut = process.env.OCP_NO_SKIP_PERMS === '1'
+                       || process.env.OCP_NO_SKIP_PERMS === 'true'
+                       || options['dangerously-skip-permissions'] === false;
+  if (options['dangerously-skip-permissions'] !== true && !skipPermsOptOut) {
     options['dangerously-skip-permissions'] = true;
+  }
+
+  // CLI-only default: honour `OCP_NO_SESSION_PERSISTENCE=1` when the user
+  // has not explicitly set `--no-session-persistence`. Stateless
+  // integrations (consumer apps that rebuild conversation context server-
+  // side every turn) otherwise accumulate dead JSONL files under
+  // `~/.claude/projects/<cwd>/` and pollute the `--continue` lookup.
+  // Library callers via `createDriver()` / `createChatClient()` keep
+  // their own defaults — this opt-in only changes the CLI default.
+  if (options['no-session-persistence'] !== true
+   && (process.env.OCP_NO_SESSION_PERSISTENCE === '1'
+    || process.env.OCP_NO_SESSION_PERSISTENCE === 'true')) {
+    options['no-session-persistence'] = true;
   }
 
   // CLI-only default: pre-approve the read-only network tools so that a
@@ -111,32 +133,14 @@ async function main() {
     options['allowed-tools'] = merged;
   }
 
-  // No CLI-side `--permission-mode` default. `acceptEdits` looked
-  // attractive ("auto-accept edits, prompt for rest"), but in PTY
-  // interactive mode claude's permission prompt is an interactive y/n
-  // box the headless driver can't answer — so any tool NOT in
-  // `--allowed-tools` still hangs the turn. `bypassPermissions` (=
+  // The `--permission-mode` field is forwarded as-is when set; ocp
+  // does not default it. `bypassPermissions` (=
   // `--dangerously-skip-permissions`) is the only mode that's truly
-  // hang-free, and we don't default to it because it's a real security
-  // escalation (Bash, Edit, Write all run unprompted). Users who want
-  // full auto set `OCP_DEFAULT_SKIP_PERMS=1` once in their shell, or
-  // pass `--dangerously-skip-permissions` per call. The `--allowed-tools`
-  // default below pre-approves the safe network tools so the most
-  // common case (current-info queries) works without bypass.
-
-  // Per-invocation reminder when both opt-in envs are active — that
-  // combination means "any new cwd auto-trusted + every tool runs
-  // without a prompt". A forgotten `export` in ~/.zshrc is otherwise
-  // invisible. Set OCP_NO_WARN=1 to silence.
-  if (process.env.OCP_DEFAULT_SKIP_PERMS === '1'
-   && process.env.OCP_AUTO_ACCEPT_TRUST === '1'
-   && process.stderr.isTTY
-   && process.env.OCP_NO_WARN !== '1') {
-    process.stderr.write(
-      '\x1b[33m[ocp] OCP_DEFAULT_SKIP_PERMS + OCP_AUTO_ACCEPT_TRUST active — tools run unprompted in any cwd.\n' +
-      '       Unset one of those envs in ~/.zshrc to restore prompts, or set OCP_NO_WARN=1 to silence this notice.\x1b[0m\n',
-    );
-  }
+  // hang-free under PTY automation, and it's the new 1.1 CLI default
+  // above. Opt out per-shell with `OCP_NO_SKIP_PERMS=1` if you want
+  // claude's normal permission prompts back (they will hang every
+  // tool call that needs approval, which is the un-automatable case
+  // this tool exists to work around).
 
   // CLI-only default: encourage tool use for current/time-sensitive
   // queries via the same SDK-wide DEFAULT_APPEND_SYSTEM_PROMPT the
@@ -281,7 +285,7 @@ async function main() {
       if (options.debug) {
         process.stderr.write(`[ocp] daemon: completion=${result.completionReason} duration=${result.durationMs}ms\n`);
       }
-      return mapCompletionToExit(result);
+      return mapCompletionToExit(result, { debug: options.debug, prompt });
     } catch (e) {
       // Distinguish "daemon unreachable / crashed" (safe to retry direct)
       // from "daemon explicitly refused this request" (must NOT retry —
@@ -349,7 +353,7 @@ async function main() {
           `[ocp] print-mode completion=${result.completionReason} duration=${result.durationMs}ms\n`,
         );
       }
-      return mapCompletionToExit(result);
+      return mapCompletionToExit(result, { debug: options.debug, prompt });
     } finally {
       await driver.close();
     }
@@ -381,7 +385,7 @@ async function main() {
         `rawBytes=${result.diagnostics.rawBytes} strippedBytes=${result.diagnostics.strippedBytes}\n`,
       );
     }
-    return mapCompletionToExit(result);
+    return mapCompletionToExit(result, { debug: options.debug, prompt });
   } finally {
     await driver.close();
   }
@@ -578,7 +582,7 @@ async function runStreamJsonInputLoop({ driver, adapter, options, unknown, ac })
         `[ocp] turn done: sid=${currentSessionId} completion=${result.completionReason}\n`,
       );
     }
-    const turnExit = mapCompletionToExit(result);
+    const turnExit = mapCompletionToExit(result, { debug: options.debug, prompt: content });
     if (turnExit !== EXIT.OK) lastExit = turnExit;
     if (ac.signal.aborted) break;
   }
@@ -589,14 +593,15 @@ async function runStreamJsonInputLoop({ driver, adapter, options, unknown, ac })
   return lastExit;
 }
 
-function mapCompletionToExit(result) {
+function mapCompletionToExit(result, ctx) {
   if (result.completionReason === 'timeout') {
-    printStalledOutput(result);
+    const cause = detectStallCause(result.diagnostics?.stalledOutputTail);
     process.stderr.write(
       'ocp: hard timeout waiting for response. Increase OCP_MAX_RESPONSE_MS\n' +
-      '  if the upstream genuinely needs more time, or inspect the screen\n' +
-      '  above for an interactive prompt we did not recognise.\n',
+      '  if the upstream genuinely needs more time.\n' +
+      formatDetectedHint(cause),
     );
+    printStalledOutput(result, ctx);
     return EXIT.TIMEOUT;
   }
   if (result.completionReason === 'cancelled') return EXIT.CANCELLED;
@@ -606,27 +611,65 @@ function mapCompletionToExit(result) {
       '  Run `OCP_AUTO_ACCEPT_TRUST=1 ocp …` to auto-accept it, or run\n' +
       '  `claude` directly in this directory once and choose "Yes".\n',
     );
-    printStalledOutput(result);
+    printStalledOutput(result, ctx);
     return EXIT.INTERACTIVE_REQUIRED;
   }
   if (result.completionReason === 'interactive-required') {
+    const cause = detectStallCause(result.diagnostics?.stalledOutputTail);
     process.stderr.write(
       'ocp: no response after waiting — claude TUI appears to be blocked\n' +
-      '  on an interactive prompt we cannot answer (tool-permission, MCP\n' +
-      '  auth, login expiry, theme picker, or a dialog new to this claude\n' +
-      '  version). The current PTY screen is shown below so you can handle\n' +
-      '  it manually by running `claude` directly in this directory.\n',
+      '  on an interactive prompt we cannot answer.\n' +
+      formatDetectedHint(cause),
     );
-    printStalledOutput(result);
+    printStalledOutput(result, ctx);
     return EXIT.INTERACTIVE_REQUIRED;
   }
   if (result.completionReason === 'max-turns') return EXIT.GENERIC_ERROR;
   return result.isError ? EXIT.GENERIC_ERROR : EXIT.OK;
 }
 
-function printStalledOutput(result) {
+/**
+ * Format the best-guess cause hint into the standard "  detected: …" line
+ * appended to the abort error. Returns "" when no cause was detected so
+ * the caller can concatenate unconditionally.
+ *
+ * @param {ReturnType<typeof detectStallCause>} cause
+ */
+function formatDetectedHint(cause) {
+  if (!cause) return '';
+  // Wrap long hints at ~70 chars so they stay readable in 80-col terminals.
+  const wrapped = cause.hint
+    .replace(/(.{1,68})(?:\s+|$)/g, (_m, line) => `  ${line.trim()}\n`)
+    .replace(/^\s{2}/, '             '); // align first line under "detected: <kind> — "
+  return `  detected: ${cause.kind} —\n${wrapped}`;
+}
+
+/**
+ * Emit the captured PTY tail to stderr, redacting any line that came
+ * from the user's prompt (which the TUI echoes back as `[Pasted text]`
+ * blocks or wrapped input lines).
+ *
+ * Default behaviour is OFF — most automation runs do not want a multi-
+ * kilobyte screen blob in their error logs, and the dump can leak the
+ * caller's prompt (and any RAG context glued into it) to anyone with
+ * stderr visibility. Opt back in with `OCP_DUMP_STALL=1` or `--debug`.
+ *
+ * @param {object} result
+ * @param {{ debug?: boolean, prompt?: string }} [ctx]
+ */
+function printStalledOutput(result, ctx) {
   const tail = result.diagnostics?.stalledOutputTail;
   if (!tail) return;
+  const wantDump = ctx?.debug
+    || process.env.OCP_DUMP_STALL === '1'
+    || process.env.OCP_DUMP_STALL === 'true';
+  if (!wantDump) {
+    process.stderr.write(
+      '  (set OCP_DUMP_STALL=1 to see the captured PTY screen — omitted by\n' +
+      '   default because it can include the caller-supplied prompt text.)\n',
+    );
+    return;
+  }
   // ansiStripParser removes only ESC-introduced sequences. Bare C1 /
   // BEL / BS / CR injected by upstream into the TUI buffer would still
   // reach stderr and corrupt the user's terminal. Strip them here.
@@ -634,9 +677,42 @@ function printStalledOutput(result) {
   // a full-screen TUI capture — explicitly pass the buffer cap from
   // upstream so the operator sees the actual stalled screen.
   const safe = stripTerminalControl(tail, Number.MAX_SAFE_INTEGER);
+  const redacted = redactPromptEcho(safe, ctx?.prompt);
   process.stderr.write('\n─── current claude TUI screen (tail) ───\n');
-  process.stderr.write(safe + '\n');
+  process.stderr.write(redacted + '\n');
   process.stderr.write('─── end ───\n\n');
+}
+
+/**
+ * Drop lines from the captured tail that are substantially a back-echo
+ * of the caller's prompt. claude's TUI re-wraps pasted content into
+ * `[Pasted text #N]` blocks and may interleave fragments across the
+ * screen; we cannot reverse that perfectly, so we use a coarse
+ * substring test: if a tail line ≥ 24 chars appears verbatim inside the
+ * prompt, replace it with a placeholder.
+ *
+ * @param {string} tail
+ * @param {string|undefined} prompt
+ */
+function redactPromptEcho(tail, prompt) {
+  if (!prompt || typeof prompt !== 'string' || prompt.length < 32) return tail;
+  // Pre-compute the prompt as a single normalised search string. Collapse
+  // runs of whitespace so re-wrapped fragments still hit.
+  const haystack = prompt.replace(/\s+/g, ' ');
+  return tail
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trim();
+      if (trimmed.length < 24) return line;
+      const norm = trimmed.replace(/\s+/g, ' ');
+      // Treat 24+ char overlaps with the user's prompt as echo. A
+      // substring test is a defensible balance — short fragments below
+      // the threshold are kept (they may be TUI chrome we need to read),
+      // while paragraph-sized echoes are dropped.
+      if (haystack.includes(norm)) return '  [prompt echo redacted]';
+      return line;
+    })
+    .join('\n');
 }
 
 // ── helpers ────────────────────────────────────────────────────────────

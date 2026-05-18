@@ -258,6 +258,19 @@ const server = net.createServer((socket) => {
   });
 });
 
+// Pre-unlink any stale socket file left by a predecessor that exited
+// uncleanly (SIGKILL, OOM, machine crash). Without this, `server.listen`
+// fails with EADDRINUSE even though no process is bound — and the client
+// has no way to tell apart "another daemon is running" from "a dead file
+// is in the way", so it gives up and falls back to direct mode. ENOENT
+// (no leftover) is the normal case; any other error rethrows so we do
+// not silently mask permission problems.
+try {
+  await unlink(socketPath);
+} catch (e) {
+  if (e.code !== 'ENOENT') throw e;
+}
+
 server.listen(socketPath, async () => {
   // Restrict the unix socket to the owning user — defense in depth on
   // multi-user hosts so other local accounts cannot inject argv via IPC.

@@ -154,7 +154,12 @@ export const OPTION_SPEC = [
     name: 'no-session-persistence',
     kind: 'boolean',
     default: false,
-    description: 'Disable saving the session for later resume.',
+    env: 'OCP_NO_SESSION_PERSISTENCE',
+    description:
+      'Disable saving the session for later resume. Useful for stateless ' +
+      'integrations that rebuild conversation context every turn — without ' +
+      'this, `~/.claude/projects/<cwd>/` accumulates dead JSONL files. ' +
+      'Set `OCP_NO_SESSION_PERSISTENCE=1` to apply per shell.',
     forward: { type: 'argv', flag: '--no-session-persistence' },
   },
   {

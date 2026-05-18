@@ -14,11 +14,15 @@
 
 > **핵심 차이**: `claude -p`는 Claude Code의 비대화형 모드로 내부 API를 통해 동작하지만, 특정 플랜/환경에서는 사용할 수 없습니다. `open-claude-p`는 실제 TUI 클라이언트를 PTY로 실행하고 출력 스트림을 파싱하여 동일한 결과를 얻습니다.
 
+**버전 기록**: [CHANGELOG.md](./CHANGELOG.md) 참조.
+
 ---
 
 ## 목차
 
 - [설치](#설치)
+- [권장 1회 설정](#권장-1회-설정)
+- [`claude -p` 와의 알려진 차이점](#claude--p-와의-알려진-차이점)
 - [CLI 사용법](#cli-사용법)
 - [데몬 (세션 유지)](#데몬-세션-유지)
 - [라이브러리 API](#라이브러리-api)
@@ -65,6 +69,83 @@ npm install /path/to/open-claude-p
 # Claude Code CLI 설치 확인
 claude --version
 ```
+
+---
+
+## 권장 1회 설정
+
+**1.1+ 에서는 필요 없습니다.** CLI 기본값이 이미 permissive로 잡혀 있어요:
+폴더 신뢰 다이얼로그 자동 수락 ON, `--dangerously-skip-permissions` ON.
+`npm install -g open-claude-p` 후 `ocp "..."` 가 바로 동작합니다.
+
+claude의 기본 권한 프롬프트를 다시 받고 싶다면 (PTY 자동화에선 답할 수 없어
+모든 도구 호출이 hang 됩니다) opt-out 환경변수로 비활성화:
+
+```bash
+export OCP_NO_AUTO_ACCEPT_TRUST=1   # "이 폴더 신뢰?" 다이얼로그에서 abort
+export OCP_NO_SKIP_PERMS=1          # claude의 일반 권한 프롬프트 복구
+```
+
+> ⚠️ 기본 CLI 설정으로는 `ocp "…"` 호출 한 번이 입력 프롬프트에 따라 Bash,
+> Write, Edit 등의 도구를 무확인으로 실행합니다. 개인 워크스테이션이나
+> 운영자가 직접 프롬프트를 작성하는 통제된 서비스 계정엔 맞지만, **신뢰
+> 안 되는 입력**(공개 챗봇, 프롬프트 인젝션 위험이 있는 RAG 등)이 프롬프트에
+> 섞이는 곳에선 절대 그대로 쓰지 마세요. `--allowed-tools`, `OCP_NO_SKIP_PERMS=1`,
+> 또는 호출별 검증으로 표면을 좁혀야 합니다.
+>
+> 라이브러리 기본값 (`createDriver` / `createChatClient`) 은 그대로 보수적
+> — 라이브러리 호출자가 명시적으로 권한 우회를 opt-in 합니다.
+
+전체 환경변수 목록은 [docs/cli-reference.md](./docs/cli-reference.md) 참고.
+
+---
+
+## `claude -p` 와의 알려진 차이점
+
+`ocp`는 argv 호환 shim이며, `claude -p`와 완전히 동일한 바이트 결과를 보장하진
+않습니다. 다음 케이스에서는 동일 옵션이라도 동작이 달라지니, consumer 파이프라인
+연동 시 미리 고려하세요:
+
+- **`~/.claude.json` 상태에 민감.** PTY 레이어가 매 spawn마다 전체 TUI 배너를
+  렌더하므로 "1 MCP server needs auth · /mcp", "auto mode unavailable",
+  플러그인 업데이트 알림 등도 표시됩니다. `claude -p`는 이런 걸 안 그리지만
+  `ocp`는 본질적으로 화면을 거쳐가요. 진짜로 abort 시키진 않지만(`⏺` 또는
+  spinner 이벤트가 보일 때까지 대기), 알림 트래픽이 많으면 first-response
+  latency가 `OCP_FIRST_RESPONSE_MS`(기본 20s)를 넘겨 spurious 한
+  `interactive-required` abort가 날 수 있어요. env를 늘리거나, 안 쓰는
+  MCP/플러그인 항목을 `~/.claude.json`에서 제거하세요.
+
+- **1KB 초과 프롬프트는 청크 라이팅 경로 사용.** 다중 KB 한 줄 write로
+  claude의 paste 감지가 켜지면 trailing CR이 paste content로 먹혀
+  프롬프트가 영영 submit 안 되는 회귀가 있었습니다. 1.1+ 부터는 약 256자
+  단위로 짧은 delay를 두고 chunked write — 50–500 ms 추가 latency. 옛
+  동작이 필요하면 `OCP_PASTE_MODE=raw`, TUI 입력박스 자체를 우회하려면
+  `--input-format=stream-json`.
+
+- **세션 영속화 기본 ON.** 매 턴 `~/.claude/projects/<encoded-cwd>/`에 JSONL
+  세션 파일을 기록합니다. 매 턴 컨텍스트를 서버 측에서 재구성하는 stateless
+  통합에선 `OCP_NO_SESSION_PERSISTENCE=1` (또는 `--no-session-persistence`)
+  로 끄세요. 안 끄면 dead 세션 파일이 쌓이고 `--continue` 조회가 엉뚱한
+  이웃 파일을 집을 수 있습니다.
+
+- **데몬은 호출자 종료 후에도 살아남음.** `~/.ocp/d-<hash>.sock`에 daemon이
+  attach되어 다음 호출에서 2.5s warmup을 건너뜁니다. `OCP_DAEMON_IDLE_MS`
+  (기본 10분) 동안 idle하면 자동 종료. "자식 프로세스는 부모랑 함께 죽어야
+  한다"고 기대하는 consumer 앱은 `OCP_NO_DAEMON=1`을 쓰거나 idle 타임아웃을
+  더 짧게 설정하세요.
+
+- **Print mode (`--print-mode` / `OCP_PRINT_MODE=1`) 만 PTY를 완전히 우회**
+  하고 사실상 `claude --print` + argv pass-through. MCP 서버, 도구 권한
+  프롬프트 등 인터랙티브 surface는 전부 동작 안 함 — fallback이나 upstream
+  parity 테스트 용도로만.
+
+- **Abort 시 응답 어댑터는 PTY 노이즈를 전달하지 않음.** completionReason이
+  `timeout` / `interactive-required` / `trust-required` / `cancelled` /
+  `write-failed` / `upstream-exited` 중 하나면, `text`·`stream-json` 어댑터는
+  누적된 PTY 콘텐츠를 모델 응답으로 emit하지 않습니다. `stream-json`은
+  `result.subtype=error` + `completion=<reason>`만 emit, 짧은 stderr 에러
+  메시지에 `detected: <kind>` 힌트를 출력. `claude -p`는 조용히 실패하거나
+  당시 갖고 있던 텍스트를 그대로 echo하던 부분과 다릅니다.
 
 ---
 
@@ -498,7 +579,26 @@ const nextPrompt = `이전 응답: ${result.text}\n\n이제 다음 단계를 진
 
 ## 환경변수
 
-### 드라이버 옵션
+### 자주 쓰는 것
+
+| 변수명 | 설명 |
+|--------|------|
+| `OCP_NO_AUTO_ACCEPT_TRUST=1` | 1.1 기본값(폴더 신뢰 자동수락) 비활성화. 다이얼로그가 뜨면 abort 시키고 싶을 때. |
+| `OCP_NO_SKIP_PERMS=1` | 1.1 CLI 기본값(`--dangerously-skip-permissions`) 비활성화. claude의 일반 권한 프롬프트가 다시 활성화되며, PTY 자동화가 답할 수 없어 모든 도구 호출이 hang됩니다. |
+| `OCP_NO_SESSION_PERSISTENCE=1` | 매 턴 JSONL 세션 파일 기록 비활성화. 매 턴 컨텍스트를 재구성하는 stateless 통합용. |
+| `OCP_NO_LIVE=1` | stderr의 live 스피너 비활성화 |
+| `OCP_NO_META=1` | trailing meta 푸터(`⏱ … · 🔧 …`) 숨김 |
+| `OCP_NO_DAEMON=1` | 매 호출마다 신규 PTY (warm 데몬 사용 안 함) |
+| `OCP_DAEMON_IDLE_MS` | warm 데몬이 호출 사이 살아있는 시간. 기본 `600000` (10분). |
+| `OCP_MAX_RESPONSE_MS` | hard timeout, 기본 `86400000` (24시간) |
+| `OCP_FIRST_RESPONSE_MS` | 프롬프트 전송 후 N ms 안에 진행이 없으면 fail-fast, 기본 `20000` |
+| `OCP_PROMPT_BOX_WAIT_MS` | 입력 chevron(`❯`) 등장 대기 최대시간, 기본 `15000` (heavy hook/MCP 로딩 시 증가) |
+| `OCP_PASTE_MODE` | 큰 프롬프트의 TUI 입력 방식: `auto`(기본, threshold 초과 시 chunked write), `chunk`(항상 chunk), `bracket`(xterm bracketed paste 마커), `raw`(1.1 이전 atomic write) |
+| `OCP_PASTE_THRESHOLD` | `auto` paste 모드가 발동하는 byte 임계값. 기본 `1024` |
+| `OCP_DUMP_STALL=1` | abort stderr 메시지에 PTY 화면 tail 포함. 기본 미포함 (호출자 프롬프트가 echo될 수 있어 보안상 opt-in). |
+| `OCP_CLAUDE_BIN` | upstream `claude` 바이너리 경로, 기본 `'claude'` |
+
+### 드라이버 옵션 (라이브러리 호출자용)
 
 | 변수명 | 대응 옵션 | 기본값 |
 |--------|-----------|--------|
@@ -507,7 +607,6 @@ const nextPrompt = `이전 응답: ${result.text}\n\n이제 다음 단계를 진
 | `OCP_REUSE_WARMUP_MS` | `reuseWarmupMs` | `200` |
 | `OCP_IDLE_MS` | `idleMs` | `1500` |
 | `OCP_PRE_IDLE_MS` | `preIdleMs` | `8000` |
-| `OCP_MAX_RESPONSE_MS` | `maxResponseMs` | `60000` |
 | `OCP_POOL_SIZE` | `poolSize` | `0` |
 | `OCP_POOL_MAX_AGE_MS` | `poolMaxAgeMs` | `600000` |
 
@@ -565,114 +664,78 @@ OCP_NO_DAEMON=1 ocp "한 번만 실행"
 
 ## 샘플 앱 사용법
 
-`sample/` 디렉토리에는 ocp를 활용한 웹 기반 채팅 UI가 포함되어 있습니다.
+`open-claude-p/chat` 위에 만든 작은 웹 채팅 UI입니다. 소스는 upstream
+git repo의 `sample/`에 있고 **npm tarball에는 번들되지 않습니다** —
+대신 패키지가 `ocp-sample`이라는 동반 CLI를 함께 배포해서 필요할 때
+원격에서 다운로드합니다. 덕분에 publish된 install은 가볍게 유지하면서도
+데모는 한 줄로 시도 가능합니다.
 
-### 실행
-
-```bash
-cd sample
-node server.js
-# → http://localhost:3000
-```
-
-### 샘플 앱 구조
-
-```
-sample/
-  server.js        Express 서버 — ocp 드라이버 래핑, SSE 스트리밍
-  data/
-    conversations.json  대화 기록 (자동 생성)
-  public/
-    index.html     채팅 UI
-    app.js         클라이언트 JavaScript
-    style.css      스타일시트
-```
-
-### 샘플 서버 API
-
-| 엔드포인트 | 메서드 | 설명 |
-|-----------|--------|------|
-| `/api/conversations` | GET | 대화 목록 |
-| `/api/conversations/:id` | GET | 대화 상세 (전체 메시지) |
-| `/api/conversations/:id` | DELETE | 대화 삭제 |
-| `/api/chat` | POST | 메시지 전송 (SSE 스트리밍) |
-| `/api/monitor` | GET | PTY 이벤트 모니터 (SSE) |
-| `/api/skills` | GET | `~/.claude/skills/` 스킬 목록 |
-| `/api/processes` | GET | 진행 중인 요청 목록 (`id`, `prompt`, `elapsedMs`) |
-| `/api/processes/:id` | DELETE | 특정 요청 abort (`all`로 전체 종료) |
-
-### `/api/chat` SSE 이벤트
-
-채팅 요청(`POST /api/chat`)은 Server-Sent Events로 응답을 스트리밍합니다:
-
-```js
-// 클라이언트 요청
-const resp = await fetch('/api/chat', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    message: '서울 날씨 알려줘',
-    conversationId: null,    // null이면 새 대화 시작
-    skillName: 'my-skill',       // 선택사항: ~/.claude/skills/ 의 스킬 이름
-  }),
-});
-
-// SSE 이벤트 종류
-{ type: 'spinner', label: 'Searching the web...' }  // 작업 중 상태
-{ type: 'text', text: '안녕하세요...' }              // 스트리밍 텍스트 (조각)
-{ type: 'error', error: '오류 메시지' }              // 오류
-{
-  type: 'done',
-  conversationId: 'uuid',   // 대화 ID (저장됨)
-  text: '최종 전체 응답',    // 완전한 최종 텍스트 (JSONL에서 읽은 클린 마크다운)
-  isNew: true,              // 새 대화 여부
-  meta: {
-    elapsedMs: 4200,        // 소요 시간 (ms)
-    inputTokens: 1500,      // 인풋 토큰 (cache 포함)
-    outputTokens: 320,      // 아웃풋 토큰
-    costUsd: 0.0042,        // 비용 (USD)
-    tools: ['WebSearch'],   // 사용된 도구 목록
-  }
-}
-```
-
-### 샘플의 마크다운 파싱
-
-샘플 앱(`sample/public/app.js`)은 `renderMarkdown()` 함수로 `result.text`를 HTML로 변환합니다.
-
-**이 파싱 코드는 샘플 전용입니다.** 실제 프로젝트에서는:
-- 웹: `marked`, `markdown-it` 등 라이브러리 사용
-- 터미널: `cli-markdown`, `terminal-link` 등 사용
-- React: `react-markdown` 사용
-- 다른 LLM 입력: 그대로 사용
-
-### 프로세스 매니저 (`ocp-ps`)
-
-샘플 앱은 `/api/processes` API를 이용해 진행 중인 요청을 조회·취소할 수 있는 CLI 도구를 함께 제공합니다.
+### 빠른 시작
 
 ```bash
-cd sample
+npm install -g open-claude-p          # 1회만
+ocp-sample init demo                   # 다운로드 + npm install
+cd demo
+ocp-sample start                       # → http://localhost:3000
 
-node ocp-ps.js              # 실행 중인 요청 목록
-node ocp-ps.js kill <id>    # 특정 요청 abort
-node ocp-ps.js kill all     # 전체 abort
-node ocp-ps.js watch        # 1초마다 자동 갱신
+# 끝나면:
+ocp-sample stop
 ```
 
-> **참고**: `ocp-ps`는 샘플 앱의 HTTP API(`/api/processes`)를 사용하는 샘플 구현체입니다.  
-> ocp 라이브러리를 사용해 서버를 직접 구현할 때는 같은 패턴으로 프로세스 관리 API를 구성할 수 있습니다.
+### `init`이 하는 일
 
-### 스킬 호출 (`/스킬명`)
+1. upstream repo를 임시 디렉터리로 shallow-clone.
+2. `sample/` 서브트리를 `./<name>/`로 복사 (기본 `./ocp-sample/`).
+3. 복사된 `package.json`의 dev 전용 `"open-claude-p": "file:.."` dep을
+   실제 semver 범위로 재작성 — 이 CLI 자신의 버전 기반으로 pin해서
+   `ocp-sample`이 scaffold한 데모는 항상 같이 publish된 버전과 매칭됨.
+4. `npm install --no-audit --no-fund` 실행.
+5. `npm link open-claude-p` 시도 — 전역 link 없으면 silent no-op,
+   있으면 registry 카피 대신 로컬 dev 소스를 link 사용.
 
-채팅 입력창에서 `/`를 타이핑하면 `~/.claude/skills/` 의 스킬 목록이 드롭다운으로 표시됩니다.
+### 서브커맨드
+
+| 명령 | 설명 |
+|------|------|
+| `ocp-sample init [name]` | `./<name>/`(기본 `ocp-sample`)에 데모 다운로드 + install. 디렉터리가 이미 있고 비어있지 않으면 거부. |
+| `ocp-sample start [--port=N]` | CWD에서 `node server.js`를 detached로 띄움. PID는 `.ocp-sample.pid`, stdout/stderr는 `.ocp-sample.log`에 append. `PORT` env도 인식. |
+| `ocp-sample stop` | 실행 중인 PID에 SIGTERM (5초 유예 후 SIGKILL). |
+| `ocp-sample status` | `running` / `stopped` + PID + URL 출력. |
+
+### cwd에 생성되는 파일
 
 ```
-사용자 입력: /my-skill 이 문서 분석해서 결과 정리해줘
-           ↓
-서버: SKILL.md 내용을 appendSystemPrompt로 주입
-           ↓
-Claude: 스킬 지시에 따라 실행
+demo/
+├── .ocp-sample.pid    실행 중 서버 PID (start가 작성, stop이 삭제)
+├── .ocp-sample.log    detach된 서버의 stdout/stderr (append)
+├── server.js          Express + ocp/chat
+├── package.json
+├── public/            정적 채팅 UI (index.html, app.js, style.css)
+└── node_modules/      `npm install` 결과
 ```
+
+### 환경변수
+
+| 변수명 | 효과 |
+|--------|------|
+| `PORT` | `start` 기본 포트(3000) 변경. `--port=N`과 동일. |
+| `NO_COLOR=1` | ANSI 색상·스피너 비활성화 — CI나 로그 캡처에 유용. |
+| `OCP_SAMPLE_NO_TTY=1` | `NO_COLOR=1`과 동일. |
+| `OCP_SAMPLE_REPO` | `init`이 clone할 upstream git URL 변경. 테스트 용. |
+
+### 데모가 시연하는 기능
+
+데모는 의도적으로 작지만 대부분 consumer 앱이 필요로 하는 SDK
+부분들을 실제로 행사합니다:
+
+- **대화 영속화** — `chat.send` + `~/.claude/projects/<cwd>/<sid>.jsonl`
+- **SSE 스트리밍** — `assistant-text` / `spinner` / `done` 이벤트를 브라우저로
+- **스킬 호출** — `/<skill-name>` 타이핑 시 `~/.claude/skills/`의 `SKILL.md` 주입
+- **프로세스 관리** — 진행 중인 요청 목록·abort를 `/api/processes`로
+- **마크다운 렌더링** — fenced code, 헤딩, 리스트 등을 채팅 버블에서 처리하는 미니 클라이언트 렌더러
+
+`init` 후 `demo/server.js`를 보면 전체 surface가 다 있습니다 — "Express
+앱에서 `open-claude-p/chat`을 감싸는 방법" 의 정식 참고 구현으로 보세요.
 
 ---
 

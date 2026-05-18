@@ -14,11 +14,15 @@
 
 > **核心区别**：`claude -p` 是 Claude Code 的非交互模式，通过内部 API 运行，但在特定订阅/环境中不可用。`open-claude-p` 通过 PTY 运行实际的 TUI 客户端，并解析输出流以获得相同的结果。
 
+**版本历史**：参见 [CHANGELOG.md](./CHANGELOG.md)。
+
 ---
 
 ## 目录
 
 - [安装](#安装)
+- [推荐一次性配置](#推荐一次性配置)
+- [与 `claude -p` 的已知差异](#与-claude--p-的已知差异)
 - [CLI 用法](#cli-用法)
 - [守护进程（会话持久化）](#守护进程会话持久化)
 - [库 API](#库-api)
@@ -65,6 +69,78 @@ npm install /path/to/open-claude-p
 # 验证 Claude Code CLI 安装
 claude --version
 ```
+
+---
+
+## 推荐一次性配置
+
+**1.1+ 无需任何配置。** CLI 默认值已经是 permissive：
+文件夹信任对话框自动接受 ON，`--dangerously-skip-permissions` ON。
+`npm install -g open-claude-p` 之后直接 `ocp "..."` 就能工作。
+
+如果你想恢复 claude 的常规权限提示（PTY 自动化无法回答，所有工具调用
+都会 hang），用 opt-out 环境变量关闭：
+
+```bash
+export OCP_NO_AUTO_ACCEPT_TRUST=1   # "Do you trust this folder?" 对话框时 abort
+export OCP_NO_SKIP_PERMS=1          # 恢复 claude 的常规权限提示
+```
+
+> ⚠️ 在默认 CLI 设置下，`ocp "…"` 调用一次就能按 prompt 内容执行 Bash、
+> Write、Edit 等工具，且不需要任何确认。这对个人工作站和操作员亲自撰写
+> prompt 的受控服务账号是合适的，但绝对不能在**不可信输入**（公开 chatbot、
+> 易受 prompt injection 影响的 RAG 等）会混入 prompt 的地方原样使用。
+> 应通过 `--allowed-tools`、`OCP_NO_SKIP_PERMS=1` 或每次调用前的验证来
+> 缩小表面。
+>
+> 库默认值（`createDriver` / `createChatClient`）仍然保守 — 库调用方
+> 必须显式 opt-in 权限跳过。
+
+完整环境变量列表见 [docs/cli-reference.md](./docs/cli-reference.md)。
+
+---
+
+## 与 `claude -p` 的已知差异
+
+`ocp` 是 argv 兼容的 shim，并非 `claude -p` 的逐字节等价替代。以下场景
+即使使用相同参数，行为也会不同 — 集成到 consumer 流水线之前请预先考虑：
+
+- **对 `~/.claude.json` 状态敏感。** PTY 层在每次 spawn 时都会渲染完整的
+  TUI 横幅，包括 "1 MCP server needs auth · /mcp"、"auto mode unavailable"、
+  插件更新提示等。`claude -p` 不画这些，但 `ocp` 经过画面层。本身不会触发
+  abort（要等到 `⏺` 或 spinner 事件出现），但通知流量过多时
+  first-response latency 可能超过 `OCP_FIRST_RESPONSE_MS`（默认 20s），
+  产生 spurious 的 `interactive-required` abort。把这个 env 调大，或者从
+  `~/.claude.json` 移除不用的 MCP/插件条目。
+
+- **>1KB 的 prompt 走 chunked write 路径。** 单次多 KB write 会触发
+  claude 的 paste 检测，结尾 CR 被当成 paste content 消化，prompt 永远
+  不会被提交 — 这是 1.1 之前的回归。1.1+ 在大约 256 字符为单位、间隔
+  短暂 delay 地分块写入 — 增加 50–500 ms first-byte latency。需要旧行为
+  用 `OCP_PASTE_MODE=raw`；想完全绕开 TUI 输入框用 `--input-format=stream-json`。
+
+- **会话持久化默认开启。** 每轮都会向 `~/.claude/projects/<encoded-cwd>/`
+  写一个 JSONL 会话文件。对每轮在服务端重建上下文的 stateless 集成，应
+  设置 `OCP_NO_SESSION_PERSISTENCE=1`（或 `--no-session-persistence`）。
+  否则 dead 会话文件会堆积，`--continue` 查找可能选中无关的邻居文件。
+
+- **守护进程会比调用方活得更久。** `~/.ocp/d-<hash>.sock` 上分离守护进程
+  以便同一 cwd 后续调用跳过 2.5s warmup。空闲 `OCP_DAEMON_IDLE_MS`
+  （默认 10 分钟）后自动退出。期望"子进程跟父进程一起死"的 consumer
+  应用应使用 `OCP_NO_DAEMON=1` 或缩短 idle 超时。
+
+- **Print mode（`--print-mode` / `OCP_PRINT_MODE=1`）是唯一完全绕开 PTY
+  的路径**，本质上是 `claude --print` + argv 透传。MCP servers、工具
+  授权提示和其他交互界面在此模式下都不可用 — 仅用作 fallback 或上游
+  parity 测试。
+
+- **Abort 时输出适配器不传 PTY 噪声。** 当 completionReason 是
+  `timeout` / `interactive-required` / `trust-required` / `cancelled` /
+  `write-failed` / `upstream-exited` 之一时，`text` 和 `stream-json` 适配器
+  不再把累积的 PTY 内容当作模型回复 emit。`stream-json` 仅 emit
+  `result.subtype=error` + `completion=<reason>`，stderr 简短错误消息中
+  会包含模式匹配检测出的 `detected: <kind>` 提示。这与 `claude -p` 静默
+  失败或回显当时缓冲文本的行为不同。
 
 ---
 
@@ -493,7 +569,26 @@ const nextPrompt = `之前的响应：${result.text}\n\n现在继续下一步`;
 
 ## 环境变量
 
-### 驱动器选项
+### 常用
+
+| 变量 | 说明 |
+|------|------|
+| `OCP_NO_AUTO_ACCEPT_TRUST=1` | 关闭 1.1 默认值（文件夹信任自动接受）。当你希望对话框出现时让调用 abort 时设置。 |
+| `OCP_NO_SKIP_PERMS=1` | 关闭 1.1 CLI 默认值（`--dangerously-skip-permissions`）。会恢复 claude 的常规权限提示，但 PTY 自动化无法回答，所有工具调用都会 hang。 |
+| `OCP_NO_SESSION_PERSISTENCE=1` | 禁用每轮的 JSONL 会话文件写入。适合每轮在服务端重建上下文的 stateless 集成。 |
+| `OCP_NO_LIVE=1` | 禁用 stderr 上的实时 spinner |
+| `OCP_NO_META=1` | 隐藏尾部 meta 行（`⏱ … · 🔧 …`） |
+| `OCP_NO_DAEMON=1` | 每次调用都新建 PTY（不使用 warm 守护进程） |
+| `OCP_DAEMON_IDLE_MS` | warm 守护进程在调用之间的存活时间。默认 `600000`（10 分钟）。 |
+| `OCP_MAX_RESPONSE_MS` | 硬超时（毫秒），默认 `86400000`（24 小时） |
+| `OCP_FIRST_RESPONSE_MS` | 发送 prompt 后 N ms 内无进展则 fail-fast，默认 `20000` |
+| `OCP_PROMPT_BOX_WAIT_MS` | 等待输入 chevron(`❯`) 的最大时间，默认 `15000`（heavy hook/MCP 加载时调大） |
+| `OCP_PASTE_MODE` | 大 prompt 的 TUI 写入方式：`auto`（默认，超过阈值时 chunked）、`chunk`（始终 chunk）、`bracket`（xterm bracketed paste 标记）、`raw`（1.1 之前的 atomic write） |
+| `OCP_PASTE_THRESHOLD` | `auto` 模式触发 chunked write 的字节阈值。默认 `1024` |
+| `OCP_DUMP_STALL=1` | 让 abort stderr 消息包含 PTY 屏幕 tail。默认不包含（tail 可能 echo 调用方的 prompt，安全 opt-in）。 |
+| `OCP_CLAUDE_BIN` | upstream `claude` 二进制路径，默认 `'claude'` |
+
+### 驱动器选项（库调用方）
 
 | 变量 | 对应选项 | 默认值 |
 |------|---------|--------|
@@ -502,7 +597,6 @@ const nextPrompt = `之前的响应：${result.text}\n\n现在继续下一步`;
 | `OCP_REUSE_WARMUP_MS` | `reuseWarmupMs` | `200` |
 | `OCP_IDLE_MS` | `idleMs` | `1500` |
 | `OCP_PRE_IDLE_MS` | `preIdleMs` | `8000` |
-| `OCP_MAX_RESPONSE_MS` | `maxResponseMs` | `60000` |
 | `OCP_POOL_SIZE` | `poolSize` | `0` |
 | `OCP_POOL_MAX_AGE_MS` | `poolMaxAgeMs` | `600000` |
 
@@ -560,114 +654,76 @@ OCP_NO_DAEMON=1 ocp "只运行一次"
 
 ## 示例应用
 
-`sample/` 目录包含一个基于 ocp 构建的 Web 聊天 UI。
+一个基于 `open-claude-p/chat` 构建的小型 Web 聊天 UI。源代码位于
+upstream git repo 的 `sample/` 子目录中，但**不会打包进 npm tarball** —
+而是包随附一个 `ocp-sample` 配套 CLI 按需下载示例。这样既保持已发布
+install 体积小，又让示例只需一行就能试用。
 
-### 运行
-
-```bash
-cd sample
-node server.js
-# → http://localhost:3000
-```
-
-### 示例应用结构
-
-```
-sample/
-  server.js        Express 服务器 — 封装 ocp 驱动器，SSE 流式传输
-  data/
-    conversations.json  对话历史（自动生成）
-  public/
-    index.html     聊天 UI
-    app.js         客户端 JavaScript
-    style.css      样式表
-```
-
-### 示例服务器 API
-
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/api/conversations` | GET | 对话列表 |
-| `/api/conversations/:id` | GET | 对话详情（所有消息） |
-| `/api/conversations/:id` | DELETE | 删除对话 |
-| `/api/chat` | POST | 发送消息（SSE 流式传输） |
-| `/api/monitor` | GET | PTY 事件监控（SSE） |
-| `/api/skills` | GET | `~/.claude/skills/` 技能列表 |
-| `/api/processes` | GET | 进行中的请求列表（`id`、`prompt`、`elapsedMs`） |
-| `/api/processes/:id` | DELETE | 中止特定请求（`all` 中止全部） |
-
-### `/api/chat` SSE 事件
-
-聊天请求（`POST /api/chat`）以 Server-Sent Events 形式流式传输响应：
-
-```js
-// 客户端请求
-const resp = await fetch('/api/chat', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    message: '北京今天天气怎么样？',
-    conversationId: null,    // null 开始新对话
-    skillName: 'my-skill',   // 可选：~/.claude/skills/ 中的技能名称
-  }),
-});
-
-// SSE 事件类型
-{ type: 'spinner', label: 'Searching the web...' }  // 工作中状态
-{ type: 'text', text: '你好...' }                    // 流式文本（片段）
-{ type: 'error', error: '错误消息' }                 // 错误
-{
-  type: 'done',
-  conversationId: 'uuid',   // 对话 ID（已保存）
-  text: '完整最终响应',      // 完整最终文本（来自 JSONL 的干净 markdown）
-  isNew: true,              // 是否为新对话
-  meta: {
-    elapsedMs: 4200,        // 耗时（ms）
-    inputTokens: 1500,      // 输入令牌（含缓存）
-    outputTokens: 320,      // 输出令牌
-    costUsd: 0.0042,        // 费用（USD）
-    tools: ['WebSearch'],   // 使用的工具
-  }
-}
-```
-
-### 示例中的 Markdown 解析
-
-示例应用（`sample/public/app.js`）通过 `renderMarkdown()` 函数将 `result.text` 转换为 HTML。
-
-**此解析代码仅供示例使用。** 实际项目请使用：
-- Web：`marked`、`markdown-it` 等
-- 终端：`cli-markdown`、`terminal-link` 等
-- React：`react-markdown`
-- LLM 输入：直接使用
-
-### 进程管理器（`ocp-ps`）
-
-示例应用附带一个 CLI 工具，使用 `/api/processes` API 列出和取消进行中的请求。
+### 快速开始
 
 ```bash
-cd sample
+npm install -g open-claude-p          # 一次
+ocp-sample init demo                   # 下载 + npm install
+cd demo
+ocp-sample start                       # → http://localhost:3000
 
-node ocp-ps.js              # 列出进行中的请求
-node ocp-ps.js kill <id>    # 中止特定请求
-node ocp-ps.js kill all     # 中止全部
-node ocp-ps.js watch        # 每秒自动刷新
+# 完成后:
+ocp-sample stop
 ```
 
-> **注意**：`ocp-ps` 是使用示例应用 HTTP API（`/api/processes`）的示例实现。  
-> 使用 ocp 库构建自己的服务器时，可以按相同模式实现进程管理 API。
+### `init` 做了什么
 
-### 技能调用（`/技能名`）
+1. 将 upstream repo 浅 clone 到临时目录。
+2. 把 `sample/` 子树复制到 `./<name>/`（默认 `./ocp-sample/`）。
+3. 重写复制后 `package.json` 的 dev 专用 `"open-claude-p": "file:.."` 依赖
+   为真实的 semver 范围 — 基于此 CLI 自身版本 pin，保证 `ocp-sample`
+   scaffold 的示例始终与同梱版本匹配。
+4. 运行 `npm install --no-audit --no-fund`。
+5. 尝试 `npm link open-claude-p` — 没有全局 link 时 silent no-op,
+   有时用本地 dev 源代替 registry 副本。
 
-在聊天输入框中输入 `/` 会显示 `~/.claude/skills/` 中的技能下拉列表。
+### 子命令
+
+| 命令 | 说明 |
+|------|------|
+| `ocp-sample init [name]` | 将示例下载并 install 到 `./<name>/`（默认 `ocp-sample`）。如果目录存在且非空则拒绝。 |
+| `ocp-sample start [--port=N]` | 在 CWD 中以 detached 方式启动 `node server.js`。PID 写入 `.ocp-sample.pid`，stdout/stderr 追加到 `.ocp-sample.log`。也识别 `PORT` env。 |
+| `ocp-sample stop` | 对运行中 PID 发送 SIGTERM（5 秒宽限后 SIGKILL）。 |
+| `ocp-sample status` | 输出 `running` / `stopped` + PID + URL。 |
+
+### cwd 中生成的文件
 
 ```
-用户输入：/my-skill 分析这份 PRD，找出相关仓库
-          ↓
-服务器：将 SKILL.md 内容作为 appendSystemPrompt 注入
-          ↓
-Claude：按技能指令执行
+demo/
+├── .ocp-sample.pid    运行中服务器的 PID（start 写入，stop 删除）
+├── .ocp-sample.log    detached 服务器的 stdout/stderr（append）
+├── server.js          Express + ocp/chat
+├── package.json
+├── public/            静态聊天 UI（index.html, app.js, style.css）
+└── node_modules/      `npm install` 的结果
 ```
+
+### 环境变量
+
+| 变量 | 作用 |
+|------|------|
+| `PORT` | 覆盖 `start` 的默认端口(3000)。与 `--port=N` 等价。 |
+| `NO_COLOR=1` | 禁用 ANSI 颜色和 spinner — 在 CI 和日志捕获中有用。 |
+| `OCP_SAMPLE_NO_TTY=1` | 与 `NO_COLOR=1` 相同。 |
+| `OCP_SAMPLE_REPO` | 覆盖 `init` 克隆的 upstream git URL。仅测试用。 |
+
+### 示例展示的功能
+
+示例刻意做得小，但实际涵盖了大多数 consumer 应用需要的 SDK 部分:
+
+- **会话持久化** — `chat.send` + `~/.claude/projects/<cwd>/<sid>.jsonl`
+- **SSE 流式输出** — `assistant-text` / `spinner` / `done` 事件传到浏览器
+- **Skill 调用** — 在输入框输入 `/<skill-name>` 时注入 `~/.claude/skills/` 的 `SKILL.md`
+- **进程管理** — 通过 `/api/processes` 列出和中止 in-flight 请求
+- **Markdown 渲染** — 一个最简的客户端渲染器，处理聊天气泡中的 fenced code、标题、列表
+
+`init` 之后查看 `demo/server.js` 可以看到完整 surface — 把那个文件
+当作 "如何在 Express 应用中包装 `open-claude-p/chat`" 的标准参考实现。
 
 ---
 

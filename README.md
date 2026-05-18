@@ -16,10 +16,15 @@ A PTY-based compatibility layer that drives the interactive `claude` CLI via **n
 
 ---
 
+**Version history**: see [CHANGELOG.md](./CHANGELOG.md).
+
+---
+
 ## Table of Contents
 
 - [Installation](#installation)
 - [Recommended one-time setup](#recommended-one-time-setup)
+- [Known Divergences from `claude -p`](#known-divergences-from-claude--p)
 - [CLI Usage](#cli-usage) — full reference in [docs/cli-reference.md](./docs/cli-reference.md)
 - [Daemon (Session Persistence)](#daemon-session-persistence)
 - [SDK Usage](#sdk-usage) — full reference in [docs/sdk-reference.md](./docs/sdk-reference.md)
@@ -69,28 +74,93 @@ claude --version
 
 ## Recommended one-time setup
 
-`ocp` is non-interactive automation — set these once in `~/.zshrc` /
-`~/.bashrc` so prompts that need WebSearch / Bash / file tools "just
-work" without prompts you cannot answer:
+**None required in 1.1+.** The CLI defaults are now permissive: folder
+trust is auto-accepted and `--dangerously-skip-permissions` is on.
+A plain `npm install -g open-claude-p` then `ocp "…"` works.
+
+If you specifically want claude's normal prompts back (knowing that
+every tool call PTY automation can't answer will hang), opt out:
 
 ```bash
-export OCP_AUTO_ACCEPT_TRUST=1    # auto-accept "do you trust this folder?" on first use
-export OCP_DEFAULT_SKIP_PERMS=1   # default --dangerously-skip-permissions for the CLI
+export OCP_NO_AUTO_ACCEPT_TRUST=1   # abort on "Do you trust this folder?" dialog
+export OCP_NO_SKIP_PERMS=1          # restore claude's normal permission prompts
 ```
 
-Without `OCP_DEFAULT_SKIP_PERMS`, claude declines tool use with
-"I don't have access to that tool" (the permission prompt would need a
-human to click "Yes").
-
-> ⚠️ With `OCP_DEFAULT_SKIP_PERMS=1`, every `ocp "…"` invocation can
+> ⚠️ With the default CLI settings, every `ocp "…"` invocation can
 > execute Bash, Write, Edit, and other tools on whatever prompt you
-> feed it, with no per-tool confirmation. Use this on a personal
-> workstation. **Never** set it in CI, in a shared shell, or in a
-> project `.envrc` you might clone from an untrusted source.
+> feed it, with no per-tool confirmation. This is correct for a
+> personal workstation or a controlled service account whose prompts
+> you author. **Never** wire it up where untrusted input becomes part
+> of the prompt (public chatbots, prompt-injection-prone RAG, …)
+> without first locking the surface down via `--allowed-tools`,
+> `OCP_NO_SKIP_PERMS=1`, or per-call validation.
+>
+> The library defaults (`createDriver` / `createChatClient`) remain
+> conservative — those callers are explicit about opting in to skip
+> permissions.
 
 See [docs/cli-reference.md](./docs/cli-reference.md) for the full env var list.
 
 ---
+
+## Known Divergences from `claude -p`
+
+`ocp` is an argv-compatible shim, not a byte-for-byte replacement. The
+following cases produce different behaviour than running `claude -p`
+directly with the same flags. Plan for these when integrating into a
+consumer pipeline:
+
+- **Sensitivity to `~/.claude.json` state.** The PTY layer renders the
+  full upstream TUI banner on each spawn, including any "1 MCP server
+  needs auth · /mcp", "auto mode unavailable for this model", and
+  plugin-update notices the upstream chose to display. None of these
+  block `claude -p` (which renders nothing). They don't block `ocp`
+  either — `ocp` waits for a `⏺` or spinner event before declaring the
+  upstream "alive" — but heavy notice traffic can push first-response
+  latency past `OCP_FIRST_RESPONSE_MS` (default 20 s). Raise that env or
+  remove unused MCP/plugin entries from `~/.claude.json` to avoid
+  spurious `interactive-required` aborts.
+
+- **Large prompts (>1 KB) take the chunked-write path.** Single
+  multi-kilobyte `session.write` calls confuse the upstream TUI's paste
+  detector — the trailing carriage return is consumed as paste content
+  and the prompt is never submitted. `ocp` 1.1+ writes large prompts in
+  ~256-char chunks with brief delays so paste detection does not fire.
+  This adds ~50–500 ms to first-byte latency for large prompts. Switch
+  to `OCP_PASTE_MODE=raw` for the pre-1.1 behaviour, or to
+  `--input-format=stream-json` to bypass the TUI input box entirely.
+
+- **Session persistence is on by default.** Every `ocp` turn writes a
+  JSONL file under `~/.claude/projects/<encoded-cwd>/` exactly the same
+  way `claude` does. Set `OCP_NO_SESSION_PERSISTENCE=1` (or
+  `--no-session-persistence`) for stateless integrations that rebuild
+  conversation history server-side every turn — otherwise the
+  `~/.claude/projects/` directory accumulates one dead session file per
+  turn and the `--continue` lookup picks unpredictable neighbours.
+
+- **A warm daemon outlives the calling process by default.** `ocp`
+  detaches a daemon under `~/.ocp/d-<hash>.sock` so subsequent calls in
+  the same cwd skip the 2.5 s spawn warmup. The daemon exits after
+  `OCP_DAEMON_IDLE_MS` (default 10 min) of inactivity. This is by
+  design — but consumer apps that expect "child exits when I exit"
+  semantics should either set `OCP_NO_DAEMON=1` or override the idle
+  timeout to a smaller value.
+
+- **Print-mode (`--print-mode` / `OCP_PRINT_MODE=1`) is the only path
+  that bypasses the PTY entirely** and is functionally `claude --print`
+  with argv pass-through. MCP servers, tool-permission prompts, and
+  every other interactive surface are unavailable there — use it only
+  as a fallback for environments where the PTY path regresses or for
+  parity testing against upstream.
+
+- **Aborts emit a structured error frame, not assistant text.** When a
+  turn ends in `timeout`, `interactive-required`, `trust-required`,
+  `cancelled`, `write-failed`, or `upstream-exited`, the `text` /
+  `stream-json` adapter does NOT emit accumulated PTY content as the
+  assistant reply. `claude -p` would have failed silently or echoed
+  whatever it had at the time; `ocp` instead emits `result.subtype=
+  error` with `completion=<reason>` and surfaces a `detected: <kind>`
+  hint on stderr when a known dialog pattern matched.
 
 ## CLI Usage
 
@@ -641,14 +711,19 @@ Most-used:
 
 | Variable | What |
 |----------|------|
-| `OCP_AUTO_ACCEPT_TRUST=1` | Auto-accept first-use "Do you trust this folder?" dialog |
-| `OCP_DEFAULT_SKIP_PERMS=1` | Default `--dangerously-skip-permissions` for the CLI (tools just work) |
+| `OCP_NO_AUTO_ACCEPT_TRUST=1` | Disable the 1.1 default of auto-accepting the "Do you trust this folder?" dialog. Set if you want the upstream dialog to abort the call (the pre-1.1 behaviour). |
+| `OCP_NO_SKIP_PERMS=1` | Disable the 1.1 CLI default of `--dangerously-skip-permissions`. Set if you want claude's normal permission prompts (they will hang every tool call PTY automation can't answer). |
+| `OCP_NO_SESSION_PERSISTENCE=1` | Skip writing the per-turn JSONL session file. For stateless integrations that rebuild context every turn. |
 | `OCP_NO_LIVE=1` | Disable the live spinner on stderr |
 | `OCP_NO_META=1` | Hide the trailing meta footer (`⏱ … · 🔧 …`) |
 | `OCP_NO_DAEMON=1` | Fresh PTY for every call (no warm daemon) |
+| `OCP_DAEMON_IDLE_MS` | How long the warm daemon survives between calls before exiting. Default `600000` (10 min). |
 | `OCP_MAX_RESPONSE_MS` | Hard timeout in ms, default `86400000` (24 h) |
 | `OCP_FIRST_RESPONSE_MS` | Fail-fast if no progress within N ms after prompt, default `20000` |
 | `OCP_PROMPT_BOX_WAIT_MS` | Max wait for the input chevron, default `15000` (raise for heavy hook/MCP loading) |
+| `OCP_PASTE_MODE` | How large prompts are written to the TUI: `auto` (default) chunks prompts above the threshold; `chunk` always chunks; `bracket` wraps with xterm bracketed-paste markers; `raw` is pre-1.1 atomic write |
+| `OCP_PASTE_THRESHOLD` | Byte threshold above which `auto` paste mode kicks in. Default `1024` |
+| `OCP_DUMP_STALL=1` | Include the captured PTY screen tail in the abort stderr message. Default off (the tail can echo the caller's prompt). |
 | `OCP_CLAUDE_BIN` | Path to upstream `claude` binary, default `'claude'` |
 
 Full table (timeouts, pool, daemon, sanitizer escape hatch, etc.):
@@ -702,114 +777,81 @@ appears below; the canonical, fully-described table is in
 
 ## Sample App
 
-The `sample/` directory contains a web-based chat UI built with ocp.
+A small web chat UI built on top of `open-claude-p/chat`. The source
+lives under `sample/` in the upstream git repo and is **not bundled
+into the npm tarball** — the package ships a companion `ocp-sample`
+CLI that downloads the demo on demand. This keeps the published
+install small while making the demo a one-line try.
 
-### Running
-
-```bash
-cd sample
-node server.js
-# → http://localhost:3000
-```
-
-### Sample App Structure
-
-```
-sample/
-  server.js        Express server — wraps ocp driver, SSE streaming
-  data/
-    conversations.json  Conversation history (auto-generated)
-  public/
-    index.html     Chat UI
-    app.js         Client-side JavaScript
-    style.css      Stylesheet
-```
-
-### Sample Server API
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/conversations` | GET | List conversations |
-| `/api/conversations/:id` | GET | Conversation detail (all messages) |
-| `/api/conversations/:id` | DELETE | Delete conversation |
-| `/api/chat` | POST | Send message (SSE streaming) |
-| `/api/monitor` | GET | PTY event monitor (SSE) |
-| `/api/skills` | GET | Skill list from `~/.claude/skills/` |
-| `/api/processes` | GET | In-flight request list (`id`, `prompt`, `elapsedMs`) |
-| `/api/processes/:id` | DELETE | Abort a specific request (`all` to abort all) |
-
-### `/api/chat` SSE Events
-
-Chat requests (`POST /api/chat`) stream responses as Server-Sent Events:
-
-```js
-// Client request
-const resp = await fetch('/api/chat', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    message: 'What is the weather in Seoul?',
-    conversationId: null,    // null to start a new conversation
-    skillName: 'my-skill',   // optional: skill name from ~/.claude/skills/
-  }),
-});
-
-// SSE event types
-{ type: 'spinner', label: 'Searching the web...' }  // working status
-{ type: 'text', text: 'Hello...' }                  // streaming text (chunk)
-{ type: 'error', error: 'error message' }            // error
-{
-  type: 'done',
-  conversationId: 'uuid',   // conversation ID (saved)
-  text: 'full final response',  // complete final text (clean markdown from JSONL)
-  isNew: true,              // whether this is a new conversation
-  meta: {
-    elapsedMs: 4200,        // elapsed time (ms)
-    inputTokens: 1500,      // input tokens (including cache)
-    outputTokens: 320,      // output tokens
-    costUsd: 0.0042,        // cost (USD)
-    tools: ['WebSearch'],   // tools used
-  }
-}
-```
-
-### Markdown Parsing in the Sample
-
-The sample app (`sample/public/app.js`) converts `result.text` to HTML via a `renderMarkdown()` function.
-
-**This parsing code is sample-only.** For real projects, use:
-- Web: `marked`, `markdown-it`, etc.
-- Terminal: `cli-markdown`, `terminal-link`, etc.
-- React: `react-markdown`
-- LLM input: use as-is
-
-### Process Manager (`ocp-ps`)
-
-The sample app ships a CLI tool that uses the `/api/processes` API to list and cancel in-flight requests.
+### Quick start
 
 ```bash
-cd sample
+npm install -g open-claude-p          # one time
+ocp-sample init demo                   # download + npm install
+cd demo
+ocp-sample start                       # → http://localhost:3000
 
-node ocp-ps.js              # list in-flight requests
-node ocp-ps.js kill <id>    # abort a specific request
-node ocp-ps.js kill all     # abort all
-node ocp-ps.js watch        # auto-refresh every second
+# When you're done:
+ocp-sample stop
 ```
 
-> **Note**: `ocp-ps` is a sample implementation that uses the sample app's HTTP API (`/api/processes`).  
-> When building your own server with the ocp library, you can implement the same process management pattern.
+### What `init` does
 
-### Skill Invocation (`/skillname`)
+1. Shallow-clones the upstream repo into a temp directory.
+2. Copies the `sample/` subtree to `./<name>/` (default `./ocp-sample/`).
+3. Rewrites the dev-only `"open-claude-p": "file:.."` dep in the
+   copied `package.json` to a real semver range pinned against the
+   version of `ocp-sample` doing the work (so the demo always
+   matches the CLI that scaffolded it).
+4. Runs `npm install --no-audit --no-fund`.
+5. Attempts `npm link open-claude-p` — silent no-op when no global
+   link exists; when one does, the demo runs against your local
+   `open-claude-p` source instead of the registry copy.
 
-Typing `/` in the chat input shows a dropdown of skills from `~/.claude/skills/`.
+### Subcommands
+
+| Command | What |
+|---------|------|
+| `ocp-sample init [name]` | Download + install the demo into `./<name>/` (default `ocp-sample`). Refuses if the directory exists and is non-empty. |
+| `ocp-sample start [--port=N]` | Spawn `node server.js` detached from CWD. Writes PID to `.ocp-sample.pid`, appends stdout/stderr to `.ocp-sample.log`. `PORT` env also honoured. |
+| `ocp-sample stop` | SIGTERM the running PID (5 s grace, then SIGKILL). |
+| `ocp-sample status` | Print `running` / `stopped` plus PID + URL. |
+
+### Files written in the cwd
 
 ```
-User input: /my-skill Analyze this PRD and find related repos
-           ↓
-Server: injects SKILL.md content as appendSystemPrompt
-           ↓
-Claude: executes following skill instructions
+demo/
+├── .ocp-sample.pid    PID of the running server (start writes, stop deletes)
+├── .ocp-sample.log    Detached server's stdout/stderr (appended)
+├── server.js          Express + ocp/chat
+├── package.json
+├── public/            Static chat UI (index.html, app.js, style.css)
+└── node_modules/      Created by `npm install`
 ```
+
+### Environment
+
+| Variable | Effect |
+|----------|--------|
+| `PORT` | Override the default port (3000) for `start`. Same as `--port=N`. |
+| `NO_COLOR=1` | Disable ANSI colours and the spinner — useful in CI and log captures. |
+| `OCP_SAMPLE_NO_TTY=1` | Same as `NO_COLOR=1`. |
+| `OCP_SAMPLE_REPO` | Override the upstream git URL `init` clones from. Testing only. |
+
+### Demo features
+
+The demo is intentionally small but exercises the bits of the SDK
+most consumer apps need:
+
+- **Conversation persistence** via `chat.send` and `~/.claude/projects/<cwd>/<sid>.jsonl`
+- **SSE streaming** of `assistant-text` / `spinner` / `done` events to the browser
+- **Skill invocation** — typing `/<skill-name>` injects a `SKILL.md` from `~/.claude/skills/`
+- **Process management** — list and abort in-flight requests via `/api/processes`
+- **Markdown rendering** — a minimal client-side renderer so the chat bubbles show fenced code, headings, lists
+
+See `demo/server.js` after `init` for the full surface; treat that
+file as the canonical "how to wrap `open-claude-p/chat` in an
+Express app" reference.
 
 ---
 

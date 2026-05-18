@@ -18,6 +18,22 @@ import { cleanSpinnerLabel } from '../chat/event-filters.js';
 
 const SENTINEL_REGEX = /⟦OCP_END:[a-f0-9]+⟧/g;
 
+/**
+ * Completion reasons that mean we never got a real assistant response.
+ * The accumulated `text` for these is PTY-extracted noise (welcome
+ * banner, status line, prompt back-echo) and writing it to stdout makes
+ * the consumer pipeline display garbage — or the user's own prompt —
+ * as the model's reply.
+ */
+const ABORT_REASONS = new Set([
+  'timeout',
+  'interactive-required',
+  'trust-required',
+  'cancelled',
+  'write-failed',
+  'upstream-exited',
+]);
+
 export const textOutputAdapter = {
   name: 'text',
   /**
@@ -81,10 +97,15 @@ export const textOutputAdapter = {
       },
 
       /**
-       * @param {{ text: string, isError: boolean }} finalResult
+       * @param {{ text: string, isError: boolean, completionReason?: string }} finalResult
        */
       end(finalResult) {
         clearSpinner();
+        // On aborts, stdout stays empty — the CLI's stderr error message
+        // is the user-facing signal. Emitting accumulated text here is
+        // worse than useless: it puts PTY chrome into a pipe that the
+        // caller is parsing as the assistant's reply.
+        if (ABORT_REASONS.has(finalResult?.completionReason)) return;
         const text = (finalResult?.text ?? '').replace(SENTINEL_REGEX, '');
         sink.write(text);
         if (!text.endsWith('\n')) sink.write('\n');

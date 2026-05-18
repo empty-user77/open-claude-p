@@ -12,7 +12,8 @@
     "ps": "node ocp-ps.js"
   },
   "dependencies": {
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "open-claude-p": "^1.1.0"
   },
   "devDependencies": {
     "playwright": "^1.60.0"

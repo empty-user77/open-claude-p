@@ -46,6 +46,23 @@ function emit(sink, obj) {
   sink.write(JSON.stringify(obj) + '\n');
 }
 
+/**
+ * Completion reasons that indicate the upstream never produced a real
+ * response — the PTY-extracted `text` for these is almost certainly
+ * back-echo of the user prompt / welcome banner / status line, NOT an
+ * actual assistant message. Emitting it as an `assistant` event would
+ * make a consumer render PTY chrome (or worse, the user's own prompt)
+ * as the model's reply.
+ */
+const ABORT_REASONS = new Set([
+  'timeout',
+  'interactive-required',
+  'trust-required',
+  'cancelled',
+  'write-failed',
+  'upstream-exited',
+]);
+
 export const streamJsonOutputAdapter = {
   name: 'stream-json',
   /**
@@ -86,7 +103,15 @@ export const streamJsonOutputAdapter = {
         sessionId = sessionId ?? finalResult?.sessionId ?? null;
         maybeEmitInit();
 
-        if (finalResult?.text) {
+        const aborted = ABORT_REASONS.has(finalResult?.completionReason);
+
+        // Suppress the consolidated `assistant` frame on aborts. The
+        // accumulated `text` for those completions is PTY-extracted
+        // noise (welcome banner, status line, paste back-echo) and
+        // emitting it as an assistant message tricks consumers into
+        // rendering garbage — or in the worst case the user's own
+        // prompt — as the model's reply.
+        if (finalResult?.text && !aborted) {
           emit(sink, {
             type: 'assistant',
             session_id: sessionId,
@@ -98,7 +123,7 @@ export const streamJsonOutputAdapter = {
 
         emit(sink, {
           type: 'result',
-          subtype: finalResult?.isError ? 'error' : 'success',
+          subtype: (aborted || finalResult?.isError) ? 'error' : 'success',
           session_id: sessionId,
           total_cost_usd: finalResult?.cost?.totalUsd ?? null,
           num_turns: finalResult?.cost?.numTurns ?? null,
