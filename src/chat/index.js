@@ -500,9 +500,13 @@ const SENTINEL_REGEX = /⟦OCP_END:[a-f0-9]+⟧/g;
  * @param {string} [opts.dbPath]                  Path to the conversations JSON file. Default `./conversations.json`
  *                                                in the process cwd, so each project keeps its own history.
  * @param {string} [opts.skillsDir]               Directory holding `<name>/SKILL.md` files. Default `~/.claude/skills`.
- * @param {boolean} [opts.dangerouslySkipPermissions=false]
+ * @param {boolean} [opts.dangerouslySkipPermissions=true]
  *                                                Forward `--dangerously-skip-permissions` to upstream so tool
- *                                                calls (WebSearch, Bash, …) do not block on a permission prompt.
+ *                                                calls (WebSearch, Bash, …) do not block on a permission prompt
+ *                                                PTY automation cannot answer. Default ON in 1.1+ across every
+ *                                                surface (CLI, driver, chat client) — pass `false` explicitly
+ *                                                to restore claude's interactive permission prompts (and accept
+ *                                                that every tool call will then hang).
  * @param {string|null} [opts.appendSystemPrompt] Appended to every turn's system prompt. Pass `null` to disable
  *                                                the default ("use WebSearch immediately …") text.
  * @param {object} [opts.pricing]                 Per-token rates: `{ input, cacheWrite, cacheRead, output }`.
@@ -518,7 +522,12 @@ export function createChatClient(opts = {}) {
     ? path.resolve(opts.dbPath)
     : path.resolve(process.cwd(), DEFAULT_DB_FILENAME);
   const skillsDir = path.resolve(opts.skillsDir ?? DEFAULT_SKILLS_DIR);
-  const dangerouslySkipPermissions = opts.dangerouslySkipPermissions ?? false;
+  // Default ON across the SDK in 1.1+: PTY automation cannot answer
+  // an interactive permission prompt, so leaving this off makes the
+  // first tool call hang forever. Library callers who genuinely want
+  // claude to prompt must pass `dangerouslySkipPermissions: false`
+  // explicitly. The `??` operator preserves explicit `false`.
+  const dangerouslySkipPermissions = opts.dangerouslySkipPermissions ?? true;
   // Store the raw client-level option (string | null | undefined); the
   // per-turn compose merges it with the SDK base default and any
   // per-turn override.

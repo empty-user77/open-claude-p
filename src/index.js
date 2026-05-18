@@ -207,7 +207,11 @@ class Driver {
    * @param {string} [req.systemPrompt]
    * @param {string[]} [req.allowedTools]
    * @param {string[]} [req.disallowedTools]
-   * @param {boolean} [req.dangerouslySkipPermissions]
+   * @param {boolean} [req.dangerouslySkipPermissions=true]
+   *   Default ON in 1.1+. PTY automation cannot answer claude's
+   *   interactive y/n permission prompt, so leaving it OFF makes
+   *   the first tool call hang forever. Pass `false` explicitly to
+   *   restore the prompts (and accept the hang).
    * @param {boolean} [req.debug]
    * @param {boolean} [req.verbose]
    * @param {string[]} [req.passThroughArgv]   extra argv to forward verbatim
@@ -222,6 +226,14 @@ class Driver {
     if (!req?.prompt || typeof req.prompt !== 'string') {
       throw new Error('runOneShot: `prompt` (string) is required');
     }
+
+    // Default ON across the driver in 1.1+: PTY automation has no
+    // way to answer claude's interactive permission prompt, so a
+    // request that doesn't explicitly set it would otherwise hang on
+    // the first tool call. We mutate `req` in place because every
+    // downstream branch (print-mode, daemon proxy, buildSpawnArgs)
+    // reads the same field. `??` keeps an explicit `false` intact.
+    req.dangerouslySkipPermissions = req.dangerouslySkipPermissions ?? true;
 
     // Print-mode short-circuit: spawn `claude --print` directly, bypass
     // the PTY+TUI pipeline. Caller opts in via req.printMode, driver-level

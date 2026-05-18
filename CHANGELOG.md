@@ -64,12 +64,18 @@ extraction path so PTY chrome can no longer leak into responses.
 
 ### Changed
 
-- **`--dangerously-skip-permissions` is now the CLI default.**
-  Rationale: `ocp` is a non-interactive PTY automation surface. A
-  permission prompt that wants a human y/n hangs forever — every
-  Bash / Edit / Write / MCP call breaks without this flag. Library
-  callers (`createDriver` / `createChatClient`) keep the
-  conservative `false` default; only the `ocp` binary flips.
+- **`--dangerously-skip-permissions` / `dangerouslySkipPermissions`
+  is now the default ON across EVERY surface** — `ocp` CLI,
+  `createDriver().runOneShot()`, `createChatClient()`, and the
+  `sample/` server. Rationale: `ocp` is a PTY automation library; an
+  interactive permission prompt that wants a human y/n hangs forever
+  — every Bash / Edit / Write / MCP / WebSearch call breaks without
+  this flag. The pre-1.1 library default of `false` was the cause
+  of nearly every "the SDK silently hangs on tool use" report.
+  Opt out per surface:
+  - CLI: `OCP_NO_SKIP_PERMS=1` (env)
+  - `createChatClient({ dangerouslySkipPermissions: false })`
+  - `runOneShot({ dangerouslySkipPermissions: false })`
   Pre-1.1 users with `OCP_DEFAULT_SKIP_PERMS=1` exported see no
   change; the env is now a no-op.
 - **Folder-trust dialog is auto-accepted by default.** Same

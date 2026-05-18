@@ -30,14 +30,13 @@ const PUBLIC_DIR  = path.join(__dirname, 'public');
 const chat = createChatClient({
   dbPath: path.join(DATA_DIR, 'conversations.json'),
   skillsDir: path.join(os.homedir(), '.claude', 'skills'),
-  // The sample defaults to running tools without permission prompts so
-  // tool calls (WebSearch, WebFetch, …) just work. PTY automation
-  // cannot answer claude's interactive y/n permission prompts, so
-  // leaving this off means the very first tool call hangs forever.
-  // Opt out (and let claude prompt for every tool) by setting
-  // `SAMPLE_STRICT_PERMS=1` at startup — useful when wiring the demo
-  // up to an untrusted prompt source.
-  dangerouslySkipPermissions: process.env.SAMPLE_STRICT_PERMS !== '1',
+  // `createChatClient` already defaults `dangerouslySkipPermissions`
+  // to true in 1.1+ — PTY automation can't answer claude's
+  // interactive permission prompt, so anything else would deadlock
+  // on the first tool call. No env-gate here on purpose: this demo
+  // is for trying the SDK out, not for guarding an untrusted prompt
+  // source. Wrap the chat client yourself with a stricter config
+  // for that case.
   // No `appendSystemPrompt` here — the SDK ships a sensible default
   // for interactive use. If you want to add chat-specific rules on
   // top, pass a string and it will be appended to (not replace) the
