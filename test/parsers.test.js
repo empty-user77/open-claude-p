@@ -142,6 +142,34 @@ describe('tuiFrameParser', () => {
     assert.ok(types.includes('prompt-box-shown'));
   });
 
+  test('emits prompt-box-shown for an empty input chevron alone', () => {
+    const p = tuiFrameParser.create();
+    const r = p.feed('❯ \n');
+    assert.ok(r.events.map((e) => e.type).includes('prompt-box-shown'));
+  });
+
+  test('does NOT emit prompt-box-shown for trust-dialog selection rows', () => {
+    // Regression: claude's folder-trust dialog uses `❯` to mark the
+    // currently-highlighted option (`❯ 1. Yes, I trust this folder`).
+    // The old `^[❯›❮‹]` chevron pattern matched that line, fired
+    // `prompt-box-shown`, and tricked the driver into writing the
+    // user's prompt + `\r` straight into the dialog (which then
+    // confirmed "Yes" and dropped the prompt). The new pattern
+    // excludes `chevron + space + <digit>.` so dialog rows do NOT
+    // count as the input box.
+    const p = tuiFrameParser.create();
+    const r = p.feed('❯ 1. Yes, I trust this folder\n');
+    assert.ok(!r.events.map((e) => e.type).includes('prompt-box-shown'));
+  });
+
+  test('does NOT emit prompt-box-shown for any numbered selection row', () => {
+    const p = tuiFrameParser.create();
+    const r1 = p.feed('❯ 2. No, exit\n');
+    assert.ok(!r1.events.map((e) => e.type).includes('prompt-box-shown'));
+    const r2 = p.feed('❯ 10. Some long-option text\n');
+    assert.ok(!r2.events.map((e) => e.type).includes('prompt-box-shown'));
+  });
+
   test('closes region when sentinel appears on the marker line', () => {
     const p = tuiFrameParser.create();
     const r = p.feed('⏺ apple⟦OCP_END:deadbeef⟧\n');

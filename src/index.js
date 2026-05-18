@@ -530,7 +530,17 @@ class Driver {
         ' answer above; use tools as freely and thoroughly as you would' +
         ' without this marker.)';
       const fullPrompt = req.prompt + instruction;
-      try {
+      // Skip the prompt write if the dialog watcher has already
+      // decided to abort. Without this check the trailing `\r` of
+      // the prompt lands inside whatever modal we tried to abort on
+      // (most commonly the folder-trust dialog), confirms its
+      // currently-highlighted option, and silently drops the user
+      // prompt. The detector has already been cancel()'d at this
+      // point but the await chain above does not observe that
+      // cancellation, so the write would otherwise still happen.
+      if (dialogState === 'trust-blocked' || dialogState === 'unknown-blocked') {
+        this._logDebug(`skipping prompt write — dialog blocked (${dialogState})`);
+      } else try {
         await writePromptToSession(session, fullPrompt, this.opts);
         firstResponseTimer = setTimeout(() => {
           if (!assistantActivitySeen) {

@@ -40,8 +40,21 @@ export const PATTERNS = {
   /** The `❯` chevron that marks the start of the input prompt line.
    * Once we see this we know we have reached the input box; everything
    * that follows on subsequent lines is the statusline / HUD plugin
-   * area, not response content, and is suppressed from parsing. */
-  promptInputChevron: /^[❯›❮‹]/,
+   * area, not response content, and is suppressed from parsing.
+   *
+   * NOTE: claude's TUI also uses `❯` to mark the currently-selected
+   * row in modal selection dialogs — e.g. the folder-trust dialog
+   * shows `❯ 1. Yes, I trust this folder`. The naive `/^[❯›❮‹]/`
+   * pattern misclassifies that as the input box, fires
+   * `prompt-box-shown`, and tricks the driver into writing the
+   * user's prompt into the dialog (the trailing `\r` then confirms
+   * "Yes" while the prompt itself is dropped). Anchor the match to
+   * `chevron + space + (anything-but-numbered-option)` so dialog
+   * selections do not match. The real input box is either `❯`
+   * alone, `❯ ` with a placeholder hint (`❯ Try "refactor …"`), or
+   * `❯ <typed-text>` — none of those collide with `❯ <digit>.`.
+   */
+  promptInputChevron: /^[❯›❮‹](?:$|\s(?!\d+\.\s))/,
 };
 
 /**
