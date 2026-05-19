@@ -91,6 +91,60 @@ describe('CompletionDetector — fallback paths', () => {
   });
 });
 
+describe('CompletionDetector — allowIdleWithoutResponse', () => {
+  test('slash-command path: idle fires after preIdleMs without a region entry', async () => {
+    // Mirrors the `/compact` failure mode — claude TUI runs a local
+    // operation and never opens an assistant region. Without the flag
+    // the detector would block until maxResponseMs.
+    const d = new CompletionDetector({
+      nonce: NONCE,
+      idleMs: 50,
+      preIdleMs: 80,
+      maxResponseMs: 10_000,
+      allowIdleWithoutResponse: true,
+    });
+    const start = Date.now();
+    const r = await d.done();
+    const elapsed = Date.now() - start;
+    assert.equal(r.reason, 'idle');
+    assert.equal(r.isError, false);
+    assert.ok(elapsed >= 80, `expected >=80ms, got ${elapsed}`);
+  });
+
+  test('default (flag off): no region → hard timeout, not idle', async () => {
+    // Confirms that omitting the flag preserves the pre-existing guard:
+    // idle is gated on hadAssistantText, so a no-region turn falls
+    // through to the hard timeout instead of completing prematurely.
+    const d = new CompletionDetector({
+      nonce: NONCE,
+      idleMs: 50,
+      preIdleMs: 50,
+      maxResponseMs: 120,
+    });
+    const r = await d.done();
+    assert.equal(r.reason, 'timeout');
+    assert.equal(r.isError, true);
+  });
+
+  test('flag does not short-circuit normal sentinel completion', async () => {
+    // When the flag is set but a real assistant region opens and the
+    // sentinel arrives, completion still goes via the sentinel path
+    // (not idle) — the flag only relaxes the pre-sentinel gate.
+    const d = new CompletionDetector({
+      nonce: NONCE,
+      idleMs: 60,
+      preIdleMs: 10_000,
+      maxResponseMs: 10_000,
+      allowIdleWithoutResponse: true,
+    });
+    d.onEvent({ type: 'assistant-region-entered', n: 1 });
+    d.onEvent({ type: 'sentinel', nonce: NONCE });
+    const r = await d.done();
+    assert.equal(r.reason, 'sentinel');
+    assert.equal(r.isError, false);
+  });
+});
+
 describe('CompletionDetector — max-turns', () => {
   test('aborts when assistant-region count exceeds maxTurns', async () => {
     const d = new CompletionDetector({ nonce: NONCE, idleMs: 10_000, preIdleMs: 10_000, maxResponseMs: 10_000, maxTurns: 1 });

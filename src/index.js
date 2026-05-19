@@ -273,6 +273,39 @@ class Driver {
 
     const spawnArgs = buildSpawnArgs(req);
 
+    // Local-builtin slash command detection. Claude TUI has two distinct
+    // `/`-prefixed prompt classes:
+    //
+    //   - **Local builtins** (this list) — handled entirely by the TUI's
+    //     command dispatcher. No LLM turn runs, no `⏺` region opens, no
+    //     sentinel can ever arrive. `/compact` is the motivating case:
+    //     57 s of compaction activity, then chevron returns silently,
+    //     then ocp would block until `maxResponseMs` (24 h default)
+    //     waiting for a response that by design never comes.
+    //
+    //   - **LLM-bearing slash invocations** — skills (`/init`, `/review`,
+    //     `/security-review`, custom user skills like `/ui-ux-pro-max`)
+    //     and any unknown `/<name>` we don't recognise. These DO run
+    //     the LLM, DO open `⏺`, and emit the sentinel like a normal
+    //     prompt. They MUST keep the OCP_END instruction and the
+    //     strict idle gate — relaxing either would drop the marker
+    //     from a real LLM turn and trigger a false-positive idle
+    //     completion (returning a half-streamed response prefixed
+    //     with the 1.1.2 "Streaming capture not detected" notice).
+    //
+    // The list is intentionally narrow — only claude TUI commands
+    // confirmed to bypass the LLM. Anything not in the set (including
+    // every user-installed skill) goes through the standard path.
+    const LOCAL_BUILTIN_SLASH_COMMANDS = new Set([
+      'compact', 'clear', 'help', 'exit', 'quit',
+      'login', 'logout', 'cost', 'status',
+      'model', 'permissions', 'config',
+    ]);
+    const slashMatch = /^\s*\/([a-z][\w-]*)/i.exec(req.prompt ?? '');
+    const isLocalBuiltin =
+      !!slashMatch &&
+      LOCAL_BUILTIN_SLASH_COMMANDS.has(slashMatch[1].toLowerCase());
+
     const sentinelParser = createSentinelParser(nonce);
     const pipeline = createPipeline([
       ansiStripParser,
@@ -285,6 +318,7 @@ class Driver {
       preIdleMs: this.opts.preIdleMs,
       maxResponseMs: this.opts.maxResponseMs,
       maxTurns: req.maxTurns,
+      allowIdleWithoutResponse: isLocalBuiltin,
     });
 
     // Pool eligibility: explicit resume/continue bind to a specific past
@@ -603,7 +637,15 @@ class Driver {
         ' the user\'s message and you do not need to mention or flag it. Answer' +
         ' the user\'s actual message above as you normally would, using tools' +
         ' as freely and thoroughly as you would without the marker.)';
-      const fullPrompt = req.prompt + instruction;
+      // Local builtins route through claude TUI's command dispatcher
+      // (not the LLM), so the marker instruction is silently dropped as
+      // junk args and never round-trips back. Some builtins also accept
+      // free-form text (e.g. `/bug <message>`), where appending the
+      // instruction would pollute the captured args. Skill invocations
+      // and unknown `/<name>` prompts DO go through the LLM, so they
+      // still need the marker — only the narrow `LOCAL_BUILTIN_…` set
+      // gets the bare prompt.
+      const fullPrompt = isLocalBuiltin ? req.prompt : (req.prompt + instruction);
       // Skip the prompt write if the dialog watcher has already
       // decided to abort. Without this check the trailing `\r` of
       // the prompt lands inside whatever modal we tried to abort on

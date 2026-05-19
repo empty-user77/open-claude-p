@@ -37,6 +37,20 @@ export class CompletionDetector {
    *                                        turn; when the (N+1)th turn
    *                                        opens, the request is aborted
    *                                        with reason 'max-turns'.
+   * @param {boolean} [opts.allowIdleWithoutResponse=false]
+   *                                        Permit `_onTick`'s idle fallback
+   *                                        even when no assistant region has
+   *                                        opened. Set this for prompts that
+   *                                        legitimately produce no assistant
+   *                                        turn — slash commands (`/compact`,
+   *                                        `/clear`, `/help`, …) whose
+   *                                        upstream handler runs a local
+   *                                        operation and returns directly to
+   *                                        the input box. Without this flag
+   *                                        the request would block until
+   *                                        `maxResponseMs` (24 h default)
+   *                                        because `hadAssistantText` stays
+   *                                        false for the entire turn.
    */
   constructor({
     nonce,
@@ -44,6 +58,7 @@ export class CompletionDetector {
     preIdleMs = 8000,
     maxResponseMs = 60000,
     maxTurns,
+    allowIdleWithoutResponse = false,
   } = {}) {
     if (!nonce) throw new Error('CompletionDetector: nonce is required');
     this.nonce = nonce;
@@ -51,6 +66,7 @@ export class CompletionDetector {
     this.preIdleMs = preIdleMs;
     this.maxResponseMs = maxResponseMs;
     this.maxTurns = Number.isFinite(maxTurns) && maxTurns >= 0 ? maxTurns : null;
+    this.allowIdleWithoutResponse = !!allowIdleWithoutResponse;
 
     this.startTime = Date.now();
     this.regionEntered = false;
@@ -142,7 +158,10 @@ export class CompletionDetector {
     // Pre-sentinel fallback: only valid once we've seen any assistant
     // signal, with the longer `preIdleMs` threshold so that brief render
     // pauses (common during `--resume`) do not trip premature completion.
-    if (this.hadAssistantText) {
+    // `allowIdleWithoutResponse` relaxes the gate for callers that know
+    // the turn legitimately produces no assistant region (e.g. slash
+    // commands like `/compact`).
+    if (this.hadAssistantText || this.allowIdleWithoutResponse) {
       if (idleFor >= this.preIdleMs) {
         this._complete('idle', false);
       }

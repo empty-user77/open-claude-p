@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.3] — 2026-05-19
+
+Fix the `/compact` 24-hour hang and tighten the slash-command path so
+skill invocations are not collateral damage. Driven by a captured
+session (`4af68584-…`) where a manually-triggered `/compact` ran for
+57 s of compaction activity, returned to the input box with no
+assistant turn, and left `runOneShot` waiting for a sentinel that — by
+the upstream's design — could never arrive.
+
+### Fixed
+
+- **`/compact` and other local-builtin slash commands no longer block
+  for `maxResponseMs`.** Claude TUI splits `/`-prefixed prompts into
+  two classes: *local builtins* (`/compact`, `/clear`, `/help`,
+  `/exit`, `/quit`, `/login`, `/logout`, `/cost`, `/status`, `/model`,
+  `/permissions`, `/config`) which run a local handler and never open
+  an `⏺` region, and *LLM-bearing slash invocations* (skills like
+  `/init`, `/review`, `/security-review`, plus every user-installed
+  skill) which DO go through the model. The driver previously
+  appended the OCP_END marker instruction to both and required
+  `hadAssistantText` before the completion detector's idle fallback
+  could fire — fine for the LLM-bearing class, fatal for builtins,
+  which would wait for an assistant region that never opened until
+  the 24 h hard timeout.
+
+  Now `runOneShot` matches the prompt against a narrow whitelist of
+  local builtins. On a match it (a) skips the OCP_END instruction
+  append (the TUI's command parser drops it as junk args anyway, and
+  appending it can pollute free-form-arg commands like `/bug`) and
+  (b) sets the detector's new `allowIdleWithoutResponse` flag so the
+  pre-sentinel idle path is reachable without a prior region entry.
+  Skills and unknown `/<name>` prompts are NOT in the whitelist and
+  keep the existing instruction + strict-idle-gate behaviour, so
+  their LLM responses still complete cleanly via the sentinel.
+
+### Added
+
+- **`CompletionDetector.allowIdleWithoutResponse` (default false).**
+  When true, `_onTick`'s pre-sentinel idle fallback fires after
+  `preIdleMs` of silence even without a prior `assistant-region-
+  entered`. This is the policy switch the driver uses for local
+  builtins; library callers that drive prompts known to produce no
+  assistant turn can opt in directly.
+
+### Tests
+
+- **End-to-end integration coverage for the slash-command path.**
+  `test/driver-slash-command.test.js` spawns the real driver against
+  `test/fixtures/fake-claude-tui.mjs` — a minimal node-pty fixture
+  that reproduces the captured `/compact` shape (spinner activity,
+  `Compacted` stdout, chevron return, no region, no sentinel) — and
+  asserts: `/compact` completes via `reason='idle'` in well under
+  `maxResponseMs`; a plain prompt still completes via `sentinel` with
+  no degraded-capture notice prefix; `/init` (a skill, not a builtin)
+  also completes via `sentinel`, proving the whitelist isn't too
+  greedy. Three new unit tests in `test/detector.test.js` cover the
+  bare `allowIdleWithoutResponse` flag.
+
+---
+
 ## [1.1.2] — 2026-05-19
 
 Recovery-path fixes for the sentinel-missing case. When the end-of-reply
