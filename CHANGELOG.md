@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.2] — 2026-05-19
+
+Recovery-path fixes for the sentinel-missing case. When the end-of-reply
+marker fails to land — usually because claude omitted it or the PTY
+frames were truncated — the driver's text extraction was returning
+either an empty string or, worse, the entire re-rendered transcript of
+a `--resume` session. Two changes correct that.
+
+### Fixed
+
+- **`extractAssistantText` no longer slices from the FIRST `⏺`** when
+  the sentinel is missing. On a `--resume` run the buffer carries old
+  history regions before the current response; anchoring on the first
+  `⏺` returned the oldest history turn plus everything after it,
+  silently leaking prior turns into `result.text`. The fallback now
+  uses `lastIndexOf('⏺')` so the slice always covers the current
+  turn's response. Fresh (non-resumed) sessions are unaffected because
+  the buffer only has one region marker, so first == last.
+
+### Added
+
+- **Degraded-capture notice prefix.** When `completionReason` is
+  `'idle'` (sentinel never seen, idle-fallback completed) or
+  `'jsonl-recovered'` (a stall was rescued by reading the upstream
+  JSONL session log), `result.text` is now prefixed with:
+
+  ```
+  [ocp] Streaming capture not detected — showing last result from {source}.
+  ```
+
+  where `{source}` is either `local session log` (JSONL had the
+  response) or `terminal buffer (best effort)` (JSONL was unavailable
+  and we fell back to the PTY slice above). Callers and chat UIs can
+  now distinguish a normal capture from a post-hoc recovery without
+  inspecting `completionReason`. The default success path
+  (`reason='sentinel'`) is unchanged — no prefix is added.
+
+---
+
 ## [1.1.1] — 2026-05-19
 
 Post-1.1.0 fixes driven by Cosmica integration testing. Several of

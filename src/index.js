@@ -775,6 +775,28 @@ class Driver {
       );
     }
 
+    // Degraded-capture notice. When the per-turn sentinel never landed
+    // (`reason='idle'`) or a stalled completion was rescued via JSONL
+    // (`reason='jsonl-recovered'`), the streamed PTY frames did NOT
+    // produce a clean end-of-reply boundary. The text we are returning
+    // is a post-hoc recovery — usually from the upstream JSONL session
+    // log, or as a best-effort tail of the PTY buffer when JSONL was
+    // unavailable. Prepend a one-line notice so the caller (and any
+    // chat UI rendering it) can tell this apart from a normal capture.
+    // The notice is intentionally a literal English prefix and only
+    // appears on the degraded path — the default success path
+    // (`reason='sentinel'`) is unchanged.
+    const captureFailed =
+      effectiveCompletion === 'idle' || effectiveCompletion === 'jsonl-recovered';
+    if (captureFailed && text) {
+      const source = jsonlExtraction?.text
+        ? 'local session log'
+        : 'terminal buffer (best effort)';
+      text =
+        `[ocp] Streaming capture not detected — showing last result from ${source}.\n\n` +
+        text;
+    }
+
     // For stall-style failures, capture the tail of the stripped PTY
     // buffer so the caller can see exactly what claude was rendering
     // when we gave up — that is usually the dialog or error that the
@@ -1144,9 +1166,12 @@ function extractAssistantText(stripped, nonce) {
     sentinelIdx = i;
   }
   if (sentinelIdx === -1) {
-    // Fall back to "everything after the first ⏺" — this preserves the
-    // legacy behavior when the model dropped the sentinel.
-    const ri = stripped.indexOf(marker);
+    // Sentinel-missing fallback. On a resumed session the buffer carries
+    // history regions before the current response, so anchoring on the
+    // FIRST `⏺` would slice from the oldest history turn and return the
+    // entire re-rendered transcript. Anchor on the LAST `⏺` instead —
+    // that's the region marker for the current turn even after `--resume`.
+    const ri = stripped.lastIndexOf(marker);
     return ri === -1 ? '' : stripped.slice(ri + marker.length).trim();
   }
 
