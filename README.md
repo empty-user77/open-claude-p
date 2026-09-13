@@ -192,7 +192,7 @@ ocp --output-format stream-json "Hi"
 
 # Specify model
 ocp --model sonnet "Complex question..."
-ocp --model claude-opus-4-7 "Architecture review..."
+ocp --model claude-opus-5 "Architecture review..."
 
 # Append system prompt
 ocp --append-system-prompt "Always reply in English" "what's the weather?"
@@ -413,7 +413,7 @@ const result = await driver.runOneShot({
 
   // ── Model / Behavior ──────────────────────────
   model: 'sonnet',                        // model name
-  effort: 'high',                         // 'low' | 'medium' | 'high' | 'max'
+  effort: 'high',                         // 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   thinking: 'adaptive',                   // 'enabled' | 'adaptive' | 'disabled'
   maxTurns: 5,                            // max agent turns (shim-enforced)
 
@@ -747,7 +747,7 @@ appears below; the canonical, fully-described table is in
 
 | req field | CLI flag | Type | Description |
 |-----------|----------|------|-------------|
-| `model` | `--model` | string | Model name (e.g. `sonnet`, `claude-sonnet-4-6`) |
+| `model` | `--model` | string | Model name (e.g. `sonnet`, `claude-opus-5`) |
 | `systemPrompt` | `--system-prompt` | string | Replace entire system prompt |
 | `appendSystemPrompt` | `--append-system-prompt` | string | Append to default system prompt |
 | `dangerouslySkipPermissions` | `--dangerously-skip-permissions` | boolean | Skip permission checks |
@@ -758,14 +758,19 @@ appears below; the canonical, fully-described table is in
 | `forkSession` | `--fork-session` | boolean | Create new session ID on resume |
 | `sessionId` | `--session-id` | string | Assign a specific UUID to the new session |
 | `noSessionPersistence` | `--no-session-persistence` | boolean | Disable session saving |
-| `effort` | `--effort` | enum | `low` \| `medium` \| `high` \| `max` |
+| `effort` | `--effort` | enum | `low` \| `medium` \| `high` \| `xhigh` \| `max` |
 | `thinking` | `--thinking` | enum | `enabled` \| `adaptive` \| `disabled` |
 | `maxTurns` | `--max-turns` | number | Maximum agent turns |
 | `fallbackModel` | `--fallback-model` | string | Fallback when primary model is overloaded |
-| `permissionMode` | `--permission-mode` | string | `default` \| `plan` \| `acceptEdits` \| `bypassPermissions` |
+| `permissionMode` | `--permission-mode` | string | `acceptEdits` \| `auto` \| `bypassPermissions` \| `manual` \| `dontAsk` \| `plan` |
 | `mcpConfig` | `--mcp-config` | string[] | MCP config paths |
 | `addDir` | `--add-dir` | string[] | Additional directories tools can access |
 | `bare` | `--bare` | boolean | Minimal mode (disables hooks, LSP, plugins, etc.) |
+| `autocompact` | `--autocompact` | string | Auto-compact window: `auto`, or 100k–1M tokens |
+| `safeMode` | `--safe-mode` | boolean | Start with all customizations disabled |
+| `axScreenReader` | `--ax-screen-reader` | boolean | Flat, animation-free TUI output — less chrome for the parsers to strip |
+| `forwardSubagentText` | `--forward-subagent-text` | boolean | Forward subagent text/thinking as messages (stream-json only) |
+| `excludeDynamicSystemPromptSections` | `--exclude-dynamic-system-prompt-sections` | boolean | Keep the cached prompt prefix stable across machines |
 | `debug` | `--debug` | boolean | Print debug logs to stderr |
 | `verbose` | `--verbose` | boolean | Verbose output |
 | `cwd` | `--cwd` | string | PTY process working directory |

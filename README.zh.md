@@ -164,7 +164,7 @@ ocp --output-format stream-json "你好"
 
 # 指定模型
 ocp --model sonnet "复杂问题..."
-ocp --model claude-opus-4-7 "架构评审..."
+ocp --model claude-opus-5 "架构评审..."
 
 # 添加系统提示
 ocp --append-system-prompt "始终用中文回答" "what's the weather?"
@@ -280,7 +280,7 @@ const result = await driver.runOneShot({
 
   // ── 模型 / 行为 ──────────────────────────────
   model: 'sonnet',                        // 模型名称
-  effort: 'high',                         // 'low' | 'medium' | 'high' | 'max'
+  effort: 'high',                         // 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   thinking: 'adaptive',                   // 'enabled' | 'adaptive' | 'disabled'
   maxTurns: 5,                            // 最大代理轮次（shim 强制）
 
@@ -624,7 +624,7 @@ OCP_NO_DAEMON=1 ocp "只运行一次"
 
 | req 字段 | CLI 标志 | 类型 | 说明 |
 |---------|---------|------|------|
-| `model` | `--model` | string | 模型名称（如 `sonnet`、`claude-sonnet-4-6`） |
+| `model` | `--model` | string | 模型名称（如 `sonnet`、`claude-opus-5`） |
 | `systemPrompt` | `--system-prompt` | string | 替换整个系统提示 |
 | `appendSystemPrompt` | `--append-system-prompt` | string | 追加到默认系统提示 |
 | `dangerouslySkipPermissions` | `--dangerously-skip-permissions` | boolean | 跳过权限检查 |
@@ -635,11 +635,11 @@ OCP_NO_DAEMON=1 ocp "只运行一次"
 | `forkSession` | `--fork-session` | boolean | 恢复时创建新的会话 ID |
 | `sessionId` | `--session-id` | string | 为新会话指定特定 UUID |
 | `noSessionPersistence` | `--no-session-persistence` | boolean | 禁用会话保存 |
-| `effort` | `--effort` | enum | `low` \| `medium` \| `high` \| `max` |
+| `effort` | `--effort` | enum | `low` \| `medium` \| `high` \| `xhigh` \| `max` |
 | `thinking` | `--thinking` | enum | `enabled` \| `adaptive` \| `disabled` |
 | `maxTurns` | `--max-turns` | number | 最大代理轮次 |
 | `fallbackModel` | `--fallback-model` | string | 主模型过载时的备用模型 |
-| `permissionMode` | `--permission-mode` | string | `default` \| `plan` \| `acceptEdits` \| `bypassPermissions` |
+| `permissionMode` | `--permission-mode` | string | `acceptEdits` \| `auto` \| `bypassPermissions` \| `manual` \| `dontAsk` \| `plan` |
 | `mcpConfig` | `--mcp-config` | string[] | MCP 配置路径 |
 | `addDir` | `--add-dir` | string[] | 工具可访问的附加目录 |
 | `bare` | `--bare` | boolean | 最小模式（禁用 hooks、LSP、插件等） |

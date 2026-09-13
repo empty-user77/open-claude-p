@@ -7,6 +7,279 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.1] — 2026-09-13
+
+Re-sync with Claude Code 2.1.270 and the current model lineup, and fix a
+permission regression introduced in 1.2.0.
+
+### Fixed
+
+- **`--dangerously-skip-permissions=false` and `OCP_NO_SKIP_PERMS=1` were
+  being ignored.** Two faults stacked up. `forwardedRequestFields` omits
+  `false` values (there is no argv to emit for them), and `runOneShot`
+  resolves a missing field with `?? true` — so an opt-out reached the
+  driver as "unset" and came back out as "enabled". Underneath that sat
+  an older, latent bug: the CLI's opt-out test read
+  `options['dangerously-skip-permissions'] === false`, which is *also*
+  true for the pre-seeded default, so it fired on every invocation and
+  quietly turned the whole default-assignment block into dead code — the
+  default-on behaviour had been coming from the driver's `?? true` all
+  along. `parseArgv` now reports which options argv actually supplied
+  (`result.supplied`), the opt-out keys off that, and the CLI always
+  sends a concrete boolean. Net effect on defaults: none — a plain
+  `ocp "…"` still runs with permissions bypassed — but asking for the
+  bypass back now works.
+
+### Added
+
+- **Claude Code 2.1.270 flags.**
+
+  | Flag | Purpose |
+  |------|---------|
+  | `--permission-prompts <host\|none>` | Who answers permission prompts; `none` denies rather than waiting |
+  | `--restricted` | Drop command/code-running tools and WebFetch, ignore user/project/local settings, confine file tools, refuse `bypassPermissions` |
+  | `--system-prompt-snapshot <on\|off>` | Record the system prompt once per conversation and reuse it verbatim, or re-render each request |
+
+- **`--restricted` is wired to actually work headlessly.** Upstream
+  rejects it outright when `bypassPermissions` is in play ("Error:
+  bypassPermissions not supported in restricted mode") and exits, and
+  ocp's CLI turns `--dangerously-skip-permissions` on by default — so a
+  bare `ocp --restricted "…"` would have failed every time, silently,
+  with no output. Asking for restricted mode is an explicit choice to
+  keep the permission gates, so it now stands the permissive default
+  down and defaults `--permission-prompts` to `none`, which is the only
+  setting that keeps the run from waiting on a prompt no PTY can answer.
+  Passing `--restricted` together with an explicit
+  `--dangerously-skip-permissions` is reported as a validation error
+  instead of being handed to upstream to reject.
+
+  One caveat worth knowing: a restricted run writes no session JSONL, so
+  ocp cannot use its usual clean-transcript path and reconstructs the
+  reply from the TUI frames instead. The answer is correct, but it can
+  carry leftover box-border chrome — observed on roughly two runs in
+  three, against none for the same prompts without `--restricted`.
+
+- **`parseArgv` returns `supplied`**, the set of canonical option names
+  present in argv. Defaults are pre-seeded into `options`, so this is the
+  only way to tell `--flag=false` apart from an unset flag.
+
+### Changed
+
+- **Model references refreshed to the current lineup.** Claude Fable 5.1
+  (`claude-fable-5-1`) supersedes Claude Fable 5 in the documented
+  examples; `claude-opus-5` remains the general-purpose recommendation.
+  Aliases (`fable`, `opus`, `sonnet`, `haiku`) resolve to the latest
+  model in each family and are unaffected. Verified against the upstream
+  model list and the 2.1.270 binary, which ships both `claude-fable-5-1`
+  and `claude-mythos-5-1`.
+
+### Verified
+
+- The 2.1.270 option surface was re-diffed against `OPTION_SPEC`: no
+  previously-forwarded flag was removed, and the remaining unmapped
+  flags (`--bg`, `--cloud`, `--environment`, `--from-pr`,
+  `--remote-control`, `--teleport`, `--tmux`, `--worktree`, `--chrome`)
+  are interactive or cloud-session features outside a headless shim's
+  scope.
+
+---
+
+## [1.2.0] — 2026-08-21
+
+Realign the option surface with Claude Code 2.1.x. The headline is a
+forwarding bug: roughly thirty documented flags parsed cleanly, passed
+validation, appeared in `ocp --help`, and were then silently discarded
+before the upstream `claude` process ever saw them.
+
+### Fixed
+
+- **Flags declared in `OPTION_SPEC` are no longer dropped on the way to
+  the upstream process.** `buildSpawnArgs()` has always been
+  spec-driven — it walks `OPTION_SPEC` and emits `--flag value` for
+  every entry whose `forward.type` is `'argv'`, reading
+  `req[camelCase(spec.name)]`. The other half of that contract was
+  hand-maintained: each call site in `bin/cli.js` listed the request
+  fields it cared about. The two halves drifted, and everything the
+  hand-written list had never picked up went nowhere:
+
+  `--effort`, `--thinking`, `--max-thinking-tokens`, `--fallback-model`,
+  `--tools`, `--add-dir`, `--mcp-config`, `--strict-mcp-config`,
+  `--permission-prompt-tool`, `--system-prompt-file`,
+  `--append-system-prompt-file`, `--settings`, `--setting-sources`,
+  `--agents`, `--agent`, `--plugin-dir`, `--disable-slash-commands`,
+  `--file`, `--ide`, `--betas`, `--bare`, `--init`, `--init-only`,
+  `--maintenance`, `--debug-file`, `--workload`, `--enable-auth-status`,
+  `--allow-dangerously-skip-permissions`, `--include-hook-events`, and
+  `--include-partial-messages`.
+
+  There was no error and no warning — `ocp --effort high "…"` ran at
+  the upstream default effort and reported success. The mapping now
+  comes from the same spec that produces the argv
+  (`src/options/forward.js`), across all three request paths (daemon,
+  print-mode, and the PTY path), so appending an entry to `OPTION_SPEC`
+  is once again the only edit a newly-supported flag needs.
+
+- **A concurrent session in the same directory could answer for this
+  one.** Two independent defects lined up to produce it, and both are
+  fixed:
+
+  `findRecentSessionId` is the filesystem fallback that recovers a
+  session id when none was scraped from the PTY. It accepted two classes
+  of candidate — files created during the request, and pre-existing files
+  whose mtime moved during it (the `--resume` append) — then ranked them
+  together by mtime and took the newest. A background daemon holding a
+  warm PTY in the same cwd appends to its own JSONL continuously, so it
+  reliably out-raced the file the current spawn had just created. The
+  wrong id then flowed into `readSessionText`, whose strict-by-id path
+  faithfully returned that other session's transcript as this request's
+  answer. Newly-created files now win outright; the append class is
+  consulted only when nothing new appeared, which is exactly the
+  `--resume` case it exists for.
+
+  `readSessionText` has a second path, used when no session id is known
+  at all, that scans the project directory and takes the most recently
+  modified transcript. Its own source comments describe why that is
+  unsafe — it is why the by-id path refuses to fall back to a scan — but
+  the CLI reached it on every run where the id was missing. It now
+  accepts an `expectPrompt` option and requires a candidate transcript to
+  actually contain the prompt that was sent before returning its text;
+  the CLI always supplies it. Ownership beats recency, so our own
+  transcript is still found even when a neighbour is newer, and when
+  nothing matches the caller falls back to the PTY-extracted text as
+  before. Callers that omit the option keep the previous behaviour.
+
+- **`--include-partial-messages` is no longer forwarded on the PTY
+  path.** Upstream refuses it without `--print` ("Error:
+  --include-partial-messages requires --print and
+  --output-format=stream-json") and exits immediately, so forwarding it
+  to the interactive spawn failed the whole run. OPTION_SPEC gains a
+  `printModeOnly` field for this class of flag; ocp already synthesises
+  `assistant-partial` events from the TUI frames, so nothing is lost.
+
+- **`--agents` reaches upstream as JSON again.** It is a `json`-kind
+  option, so `parseArgv` stores it already parsed and `buildSpawnArgs`'s
+  `String(value)` turned it into the literal `[object Object]`. Upstream
+  accepts that token without complaint and simply defines no agents, so
+  the flag failed silently. `json`-kind values are now re-serialised, and
+  a value supplied as raw JSON text is passed through unchanged rather
+  than double-encoded.
+
+- **`--effort xhigh` is accepted.** Upstream's levels are `low`,
+  `medium`, `high`, `xhigh`, `max`; ocp's enum was missing `xhigh`, so
+  the value most appropriate for coding and agentic work was rejected
+  at parse time.
+
+- **`--permission-mode manual` is accepted.** Upstream renamed the
+  prompt-on-every-tool mode from `default` to `manual`; ocp's validator
+  still had the old name only, so the current spelling was refused. Both
+  are accepted now — upstream continues to take `default`, so removing
+  it would have broken existing callers for no gain.
+
+- **The `env:` field in `OPTION_SPEC` does something.** It has been part
+  of the documented entry shape since 1.0 but nothing ever read it; the
+  two options that used it were wired up by hand at their call sites, so
+  any new entry declaring `env` silently had no effect. `parseArgv` now
+  applies it, with the precedence the hand-rolled versions already used:
+  **explicit argv > environment variable > spec default**. An explicit
+  `--print-mode=false` beats a set `OCP_PRINT_MODE=1`. Booleans read
+  `1` / `true` / `yes` / `on` as on; everything else, including the
+  empty string, leaves the default in place.
+
+### Added
+
+- **Upstream flags introduced since the spec was last synced.** All
+  forwarded verbatim:
+
+  | Flag | Purpose |
+  |------|---------|
+  | `--autocompact <auto\|tokens>` | Auto-compact window size (`auto`, or 100k–1M) |
+  | `--exclude-dynamic-system-prompt-sections` | Move per-machine sections out of the system prompt so the cached prefix is stable across machines |
+  | `--forward-subagent-text` | Forward subagent text/thinking as messages with `parent_tool_use_id` |
+  | `--prompt-suggestions` | Emit a `prompt_suggestion` event carrying a predicted next prompt |
+  | `--plugin-url <url…>` | Fetch a plugin `.zip` from a URL for this session |
+  | `--safe-mode` | Start with all customizations disabled |
+  | `--ax-screen-reader` | Screen-reader friendly TUI output |
+  | `--brief` | Enable the SendUserMessage tool |
+
+- **`--ax-screen-reader` is worth knowing about even if you do not need
+  accessibility.** It asks the upstream TUI for flat text with no
+  decorative borders and no animations. ocp reconstructs its answer by
+  scraping TUI frames, so there is simply less chrome for the parsers to
+  strip. It stays **opt-in** (flag, or `OCP_AX_SCREEN_READER=1`) because
+  it changes the captured frame shape, and this release does not alter
+  any default.
+
+- **New cross-flag validation.** `--forward-subagent-text` and
+  `--prompt-suggestions` both require `--output-format=stream-json`
+  (upstream only emits them on that channel, and the text/json adapters
+  have nowhere to put them). `--autocompact` is checked for `auto` or a
+  token budget in the 100k–1M range, accepting a `k`/`m` suffix.
+
+- **`buildSpawnArgs` is exported from `open-claude-p`.** It was already
+  a pure function; exporting it lets the spec → request-field → argv
+  round-trip be asserted directly in tests.
+
+### Security
+
+- **`--plugin-url` added to the `passThroughArgv` deny-list.** It loads
+  untrusted plugin code exactly like `--plugin-dir`, which was already
+  listed, so it belongs in the same group.
+
+- **`redactArgvForLog` now redacts every value of a variadic sensitive
+  flag, not just the first.** `--mcp-config` takes multiple tokens and
+  inline MCP JSON routinely carries server credentials; only the first
+  token was masked, so a `--debug` run could print a secret to stderr
+  and from there into a CI log or a pasted bug report. Previously
+  unreachable from the CLI, because `--mcp-config` was one of the flags
+  being dropped.
+
+- **Wiring the dropped flags up widens what an argv-splicing wrapper
+  exposes, and that is now documented.** ocp treats its own command line
+  as trusted; the deny-list guards only *unrecognised* argv forwarded
+  through `passThroughArgv` and has never covered ocp's own spec flags.
+  A wrapper that splices untrusted text into ocp's argv was already
+  unsafe — `--system-prompt`, `--append-system-prompt` and
+  `--allowed-tools` have always been forwarded and the CLI defaults
+  `--dangerously-skip-permissions` to on — but the newly-wired flags
+  turn that from model-mediated influence into direct process
+  execution. `docs/cli-reference.md` gains a **Never splice untrusted
+  input into ocp's argv** section with the safe pattern. The flags are
+  deliberately *not* gated behind an env var: they are documented,
+  first-class options, and hiding them would re-break exactly what this
+  release fixes.
+
+### Tests
+
+- `test/forward.test.js` (39 new tests). The central one walks
+  `OPTION_SPEC` itself and asserts that every argv-forwarding entry
+  survives the trip to the spawn argv, so a flag added to the spec is
+  covered the moment it is declared rather than whenever someone
+  remembers to extend a hand-written list. The rest pin the specific
+  flags that regressed, the refreshed `--effort` / `--permission-mode`
+  surfaces, the new validation rules, and env-var precedence.
+
+### Documentation
+
+- `docs/cli-reference.md` gains the model & behaviour flags
+  (`--effort`, `--thinking`, `--fallback-model`, `--autocompact`,
+  `--exclude-dynamic-system-prompt-sections`), a **Config, plugins &
+  MCP** section covering the flags that were being dropped, the
+  permission-mode values, the new lifecycle flags, and the env-var
+  precedence rule.
+- Model examples across `README.md`, `README.ko.md`, `README.ja.md`,
+  `README.zh.md`, `docs/cli-reference.md`, and the spec's own help text
+  moved off retired ids onto current ones (`claude-opus-5`,
+  `claude-fable-5`) and the current aliases (`fable`, `opus`, `sonnet`,
+  `haiku`).
+
+### Internal
+
+- Two comments in `bin/cli.js` used a non-English example prompt, which
+  the project's contribution rules forbid in committed files. Replaced
+  with English equivalents.
+
+---
+
 ## [1.1.3] — 2026-05-19
 
 Fix the `/compact` 24-hour hang and tighten the slash-command path so

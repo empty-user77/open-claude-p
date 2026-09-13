@@ -26,15 +26,20 @@ import { OPTION_SPEC, getOption } from './spec.js';
  * @property {string[]} positional
  * @property {string[]} unknown      Tokens that look like flags but were not in the spec.
  * @property {string[]} errors       Human-readable error strings.
+ * @property {Set<string>} supplied  Canonical names actually present in argv.
+ *   Defaults are pre-seeded into `options`, so a value alone cannot tell
+ *   "user passed `--flag=false`" apart from "user passed nothing" — this
+ *   set is the only way to distinguish them.
  */
 
 /**
  * @param {string[]} argv
+ * @param {Record<string, string|undefined>} [env]  defaults to `process.env`
  * @returns {ParseResult}
  */
-export function parseArgv(argv) {
+export function parseArgv(argv, env = process.env) {
   /** @type {ParseResult} */
-  const out = { options: {}, positional: [], unknown: [], errors: [] };
+  const out = { options: {}, positional: [], unknown: [], errors: [], supplied: new Set() };
 
   // Pre-seed defaults so the validator sees them.
   for (const spec of OPTION_SPEC) {
@@ -42,6 +47,14 @@ export function parseArgv(argv) {
       out.options[spec.name] = spec.default;
     }
   }
+
+  // Canonical names supplied on the command line. Used only by the
+  // env-var pass at the end: argv always wins over the environment, and
+  // that has to include an explicit opt-out like `--print-mode=false`,
+  // whose value is indistinguishable from the default if you compare
+  // values instead of tracking what was actually seen.
+  /** @type {Set<string>} */
+  const supplied = out.supplied;
 
   let i = 0;
   while (i < argv.length) {
@@ -63,6 +76,7 @@ export function parseArgv(argv) {
         i++;
         continue;
       }
+      supplied.add(spec.name);
       i = consumeOption(spec, argv, i, inline, out);
       continue;
     }
@@ -93,11 +107,13 @@ export function parseArgv(argv) {
             );
             break;
           }
+          supplied.add(spec.name);
           i = consumeOption(spec, argv, i, undefined, out);
           consumedByValue = true;
           break;
         }
         // Boolean short: just set.
+        supplied.add(spec.name);
         out.options[spec.name] = true;
       }
       if (!consumedByValue) i++;
@@ -109,7 +125,62 @@ export function parseArgv(argv) {
     i++;
   }
 
+  applyEnvFallbacks(out, supplied, env);
+
   return out;
+}
+
+/**
+ * Fill in options that were not supplied on the command line from their
+ * declared `env:` variable.
+ *
+ * OPTION_SPEC has always documented an `env` field, but nothing read it —
+ * the two entries that used it (`--print-mode`, `--no-session-persistence`)
+ * were wired up by hand at their call sites instead, so any new entry that
+ * declared `env` silently did nothing. This makes the declaration real, and
+ * keeps the precedence the hand-rolled versions already used:
+ *
+ *   explicit argv  >  environment variable  >  spec default
+ *
+ * Booleans accept `1` / `true` / `yes` / `on` (case-insensitive); anything
+ * else, including the empty string, leaves the option at its default so
+ * `VAR=` and `VAR=0` both read as "off". Value-taking options are coerced
+ * through the same `coerce()` path as argv, and a malformed value produces
+ * the same style of error rather than being silently ignored.
+ *
+ * @param {ParseResult} out
+ * @param {Set<string>} supplied  canonical names seen on the command line
+ * @param {Record<string, string|undefined>} env
+ */
+function applyEnvFallbacks(out, supplied, env) {
+  for (const spec of OPTION_SPEC) {
+    if (!spec.env) continue;
+    const raw = Object.prototype.hasOwnProperty.call(env ?? {}, spec.env)
+      ? env[spec.env]
+      : undefined;
+    // Library callers can pass any object as `env`; only honour real
+    // string values so a stray number/object cannot throw in `.trim()`.
+    if (typeof raw !== 'string' || raw === '') continue;
+    // Supplied on the command line — argv always wins.
+    if (supplied.has(spec.name)) continue;
+
+    if (spec.kind === 'boolean') {
+      const v = raw.trim().toLowerCase();
+      if (v === '1' || v === 'true' || v === 'yes' || v === 'on') {
+        out.options[spec.name] = true;
+      }
+      continue;
+    }
+    if (spec.kind === 'array') {
+      // Comma-separated, so a single env var can carry a repeatable flag.
+      const items = raw.split(',').map((x) => x.trim()).filter(Boolean);
+      if (items.length > 0) out.options[spec.name] = items;
+      continue;
+    }
+    const { value, error } = coerce(spec, raw);
+    if (error) out.errors.push(`${spec.env}: ${error}`);
+    else out.options[spec.name] = value;
+  }
 }
 
 /**

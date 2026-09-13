@@ -17,6 +17,9 @@
 //                   times (occurrences accumulate); array kind also collects
 //                   variadic values until the next flag-looking token.
 //     env:          Optional environment-variable fallback.
+//     printModeOnly: Only forward this flag when running under
+//                   `--print-mode`. For upstream flags that require
+//                   `--print` and abort the process without it.
 //     description:  One-line help text.
 //     forward:      How this option reaches the upstream `claude` process.
 //                     { type: 'argv', flag: '--name' }   pass to spawn argv
@@ -72,7 +75,11 @@ export const OPTION_SPEC = [
   {
     name: 'model',
     kind: 'string',
-    description: 'Model alias or full name (e.g. `sonnet`, `claude-sonnet-4-6`).',
+    description:
+      'Model alias or full name. Aliases resolve to the latest model in ' +
+      'that family (e.g. `fable`, `opus`, `sonnet`, `haiku`); full names ' +
+      'are passed through verbatim (e.g. `claude-opus-5`, ' +
+      '`claude-fable-5-1`, `claude-sonnet-5`).',
     forward: { type: 'argv', flag: '--model' },
   },
   {
@@ -226,6 +233,24 @@ export const OPTION_SPEC = [
     forward: { type: 'shim' },
   },
   {
+    name: 'forward-subagent-text',
+    kind: 'boolean',
+    default: false,
+    description:
+      'Forward subagent text and thinking blocks as assistant/user messages ' +
+      'with `parent_tool_use_id` set. Requires `--output-format=stream-json`.',
+    forward: { type: 'argv', flag: '--forward-subagent-text' },
+  },
+  {
+    name: 'prompt-suggestions',
+    kind: 'boolean',
+    default: false,
+    description:
+      'Emit a `prompt_suggestion` message after each turn carrying a ' +
+      'predicted next user prompt (stream-json output).',
+    forward: { type: 'argv', flag: '--prompt-suggestions' },
+  },
+  {
     name: 'include-hook-events',
     kind: 'boolean',
     default: false,
@@ -236,7 +261,18 @@ export const OPTION_SPEC = [
     name: 'include-partial-messages',
     kind: 'boolean',
     default: false,
-    description: 'Include partial assistant message chunks in stream-json output.',
+    // Upstream refuses this flag unless it is also given `--print`
+    // ("Error: --include-partial-messages requires --print and
+    // --output-format=stream-json") and exits immediately. The default
+    // PTY path drives the interactive TUI, so forwarding it there kills
+    // the spawn. ocp already synthesises `assistant-partial` events from
+    // the TUI frames on that path, so the flag has nothing to add there
+    // anyway — it is forwarded only under `--print-mode`.
+    printModeOnly: true,
+    description:
+      'Include partial assistant message chunks in stream-json output. ' +
+      'Forwarded upstream only under `--print-mode`; on the default PTY ' +
+      'path ocp emits `assistant-partial` events itself.',
     forward: { type: 'argv', flag: '--include-partial-messages' },
   },
 
@@ -244,8 +280,11 @@ export const OPTION_SPEC = [
   {
     name: 'effort',
     kind: 'enum',
-    choices: ['low', 'medium', 'high', 'max'],
-    description: 'Effort level the model should apply.',
+    choices: ['low', 'medium', 'high', 'xhigh', 'max'],
+    description:
+      'Effort level the model should apply (`low` | `medium` | `high` | ' +
+      '`xhigh` | `max`). `xhigh` sits between `high` and `max` and is the ' +
+      'upstream default for coding and agentic work.',
     forward: { type: 'argv', flag: '--effort' },
   },
   {
@@ -282,6 +321,14 @@ export const OPTION_SPEC = [
     forward: { type: 'shim' },
   },
   {
+    name: 'autocompact',
+    kind: 'string',
+    description:
+      'Auto-compact window size: `auto`, or an explicit token budget ' +
+      'between 100k and 1M (e.g. `200000`, `500k`).',
+    forward: { type: 'argv', flag: '--autocompact' },
+  },
+  {
     name: 'fallback-model',
     kind: 'string',
     description: 'Automatic fallback model when the primary is overloaded.',
@@ -293,8 +340,10 @@ export const OPTION_SPEC = [
     name: 'permission-mode',
     kind: 'string',
     description:
-      'Permission mode (`default` | `plan` | `acceptEdits` | ' +
-      '`bypassPermissions` | `dontAsk` | `auto`).',
+      'Permission mode (`acceptEdits` | `auto` | `bypassPermissions` | ' +
+      '`manual` | `dontAsk` | `plan`). `manual` is the current name for ' +
+      "the interactive prompt-on-every-tool mode; upstream still accepts " +
+      'the older `default` spelling, so ocp keeps accepting it too.',
     forward: { type: 'argv', flag: '--permission-mode' },
   },
   {
@@ -304,6 +353,35 @@ export const OPTION_SPEC = [
     description:
       'Allow `--dangerously-skip-permissions` as a choice without enabling it.',
     forward: { type: 'argv', flag: '--allow-dangerously-skip-permissions' },
+  },
+  {
+    name: 'permission-prompts',
+    kind: 'enum',
+    choices: ['host', 'none'],
+    description:
+      'Who answers permission prompts: `host` (the SDK host, or the tool ' +
+      'named by `--permission-prompt-tool`) or `none` (nobody — anything ' +
+      'that would prompt is denied automatically; the permission mode ' +
+      'still decides everything else). `none` suits PTY automation, which ' +
+      'has no way to answer a prompt, when denying is preferable to ' +
+      'bypassing checks outright.',
+    forward: { type: 'argv', flag: '--permission-prompts' },
+  },
+  {
+    name: 'restricted',
+    kind: 'boolean',
+    default: false,
+    description:
+      'Restricted mode: drop the built-in tools that run commands or code ' +
+      '(Bash, PowerShell, REPL, …) and WebFetch unless `--tools` names ' +
+      'them, ignore user/project/local settings files (managed settings ' +
+      'and `--settings` still apply), confine the file tools to the ' +
+      'working directories, and refuse `bypassPermissions`. Pair with ' +
+      '`--strict-mcp-config` to skip MCP servers too. Note that ocp does ' +
+      'not get its usual clean transcript in this mode — no session ' +
+      'JSONL is written for the run, so the reply is reconstructed from ' +
+      'the TUI frames and may carry leftover box-border chrome.',
+    forward: { type: 'argv', flag: '--restricted' },
   },
   {
     name: 'tools',
@@ -354,6 +432,29 @@ export const OPTION_SPEC = [
     forward: { type: 'argv', flag: '--append-system-prompt-file' },
   },
   {
+    name: 'system-prompt-snapshot',
+    kind: 'enum',
+    choices: ['on', 'off'],
+    description:
+      'Record the system prompt once per conversation and reuse it ' +
+      'verbatim on every later request and resume (`on`, the upstream ' +
+      'default), or render it fresh every request (`off`, for iterating ' +
+      'on prompt text). With `on`, a later run passing different prompt ' +
+      'text is ignored until the conversation is compacted.',
+    forward: { type: 'argv', flag: '--system-prompt-snapshot' },
+  },
+  {
+    name: 'exclude-dynamic-system-prompt-sections',
+    kind: 'boolean',
+    default: false,
+    description:
+      'Move per-machine sections (cwd, env info, memory paths, git status) ' +
+      'out of the system prompt and into the first user message, so the ' +
+      'cached prompt prefix is identical across machines and users. Ignored ' +
+      'when `--system-prompt` replaces the default prompt.',
+    forward: { type: 'argv', flag: '--exclude-dynamic-system-prompt-sections' },
+  },
+  {
     name: 'add-dir',
     kind: 'array',
     repeatable: true,
@@ -386,6 +487,13 @@ export const OPTION_SPEC = [
     repeatable: true,
     description: 'Load plugins from directory (repeatable).',
     forward: { type: 'argv', flag: '--plugin-dir' },
+  },
+  {
+    name: 'plugin-url',
+    kind: 'array',
+    repeatable: true,
+    description: 'Fetch a plugin `.zip` from a URL for this session only (repeatable).',
+    forward: { type: 'argv', flag: '--plugin-url' },
   },
   {
     name: 'disable-slash-commands',
@@ -454,6 +562,38 @@ export const OPTION_SPEC = [
     default: false,
     description: 'Run Setup hooks with the `maintenance` trigger, then continue.',
     forward: { type: 'argv', flag: '--maintenance' },
+  },
+  {
+    name: 'safe-mode',
+    kind: 'boolean',
+    default: false,
+    description:
+      'Start with all customizations disabled (CLAUDE.md, skills, plugins, ' +
+      'hooks, MCP servers, custom commands and agents, output styles, ' +
+      'workflows, themes, keybindings). Admin policy settings still apply. ' +
+      'Sets `CLAUDE_CODE_SAFE_MODE=1`. Useful for reproducing a failure ' +
+      'without local configuration in the way.',
+    forward: { type: 'argv', flag: '--safe-mode' },
+  },
+  {
+    name: 'ax-screen-reader',
+    kind: 'boolean',
+    default: false,
+    env: 'OCP_AX_SCREEN_READER',
+    description:
+      'Ask the upstream TUI for screen-reader friendly output: flat text, ' +
+      'no decorative borders, no animations. Because ocp reconstructs its ' +
+      'answer by scraping TUI frames, this markedly reduces the amount of ' +
+      'chrome the parsers have to strip. Opt-in — it changes the captured ' +
+      'frame shape, so it is never enabled by default.',
+    forward: { type: 'argv', flag: '--ax-screen-reader' },
+  },
+  {
+    name: 'brief',
+    kind: 'boolean',
+    default: false,
+    description: 'Enable the SendUserMessage tool for agent-to-user communication.',
+    forward: { type: 'argv', flag: '--brief' },
   },
   {
     name: 'debug-file',

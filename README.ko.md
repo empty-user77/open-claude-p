@@ -169,7 +169,7 @@ ocp --output-format stream-json "안녕"
 
 # 모델 지정
 ocp --model sonnet "복잡한 질문..."
-ocp --model claude-opus-4-7 "설계 리뷰..."
+ocp --model claude-opus-5 "설계 리뷰..."
 
 # 시스템 프롬프트 추가
 ocp --append-system-prompt "항상 한국어로 답변하세요" "what's the weather?"
@@ -285,7 +285,7 @@ const result = await driver.runOneShot({
 
   // ── 모델 / 동작 ──────────────────────────
   model: 'sonnet',                        // 모델 지정
-  effort: 'high',                         // 'low' | 'medium' | 'high' | 'max'
+  effort: 'high',                         // 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   thinking: 'adaptive',                   // 'enabled' | 'adaptive' | 'disabled'
   maxTurns: 5,                            // 최대 에이전트 턴 수 (shim 강제)
 
@@ -634,7 +634,7 @@ OCP_NO_DAEMON=1 ocp "한 번만 실행"
 
 | req 필드 | CLI 플래그 | 타입 | 설명 |
 |----------|-----------|------|------|
-| `model` | `--model` | string | 모델 이름 (예: `sonnet`, `claude-sonnet-4-6`) |
+| `model` | `--model` | string | 모델 이름 (예: `sonnet`, `claude-opus-5`) |
 | `systemPrompt` | `--system-prompt` | string | 시스템 프롬프트 전체 대체 |
 | `appendSystemPrompt` | `--append-system-prompt` | string | 기본 시스템 프롬프트에 추가 |
 | `dangerouslySkipPermissions` | `--dangerously-skip-permissions` | boolean | 권한 검사 건너뜀 |
@@ -645,11 +645,11 @@ OCP_NO_DAEMON=1 ocp "한 번만 실행"
 | `forkSession` | `--fork-session` | boolean | resume 시 새 세션 ID 생성 |
 | `sessionId` | `--session-id` | string | 새 세션에 특정 UUID 지정 |
 | `noSessionPersistence` | `--no-session-persistence` | boolean | 세션 저장 비활성화 |
-| `effort` | `--effort` | enum | `low` \| `medium` \| `high` \| `max` |
+| `effort` | `--effort` | enum | `low` \| `medium` \| `high` \| `xhigh` \| `max` |
 | `thinking` | `--thinking` | enum | `enabled` \| `adaptive` \| `disabled` |
 | `maxTurns` | `--max-turns` | number | 최대 에이전트 턴 수 |
 | `fallbackModel` | `--fallback-model` | string | 기본 모델 과부하 시 폴백 |
-| `permissionMode` | `--permission-mode` | string | `default` \| `plan` \| `acceptEdits` \| `bypassPermissions` |
+| `permissionMode` | `--permission-mode` | string | `acceptEdits` \| `auto` \| `bypassPermissions` \| `manual` \| `dontAsk` \| `plan` |
 | `mcpConfig` | `--mcp-config` | string[] | MCP 설정 경로 |
 | `addDir` | `--add-dir` | string[] | 도구가 접근할 추가 디렉토리 |
 | `bare` | `--bare` | boolean | 최소 모드 (hooks, LSP, 플러그인 등 비활성) |
