@@ -53,6 +53,7 @@ const UNSAFE_PASSTHROUGH_FLAGS = new Set([
   // Load untrusted agents / plugins
   '--agents',
   '--plugin-dir',
+  '--plugin-url',
   // Bypass permission gates
   '--dangerously-skip-permissions',
   '--allow-dangerously-skip-permissions',
@@ -92,7 +93,13 @@ export function redactArgvForLog(argv) {
         out.push(`${flag}=<redacted len=${tok.length - eq - 1}>`);
       } else {
         out.push(flag);
-        if (i + 1 < argv.length && !argv[i + 1].startsWith('-')) {
+        // Variadic flags (`--mcp-config a.json '{"env":{"TOKEN":"…"}}'`)
+        // carry every value token after the flag, so redacting only the
+        // first left inline MCP/settings JSON — credentials included —
+        // in the log. Consume the whole run of non-flag tokens.
+        while (i + 1 < argv.length
+               && typeof argv[i + 1] === 'string'
+               && !argv[i + 1].startsWith('-')) {
           out.push(`<redacted len=${argv[i + 1].length}>`);
           i++;
         }
@@ -1037,7 +1044,7 @@ export async function writePromptToSession(session, content, opts = {}) {
  * OPTION_SPEC and emitting each entry whose forward strategy is `argv`.
  * Pass-through tokens from the CLI's unknown-flag list are appended last.
  */
-function buildSpawnArgs(req) {
+export function buildSpawnArgs(req) {
   const args = [];
   for (const spec of OPTION_SPEC) {
     if (spec.forward?.type !== 'argv') continue;
@@ -1049,6 +1056,16 @@ function buildSpawnArgs(req) {
       if (Array.isArray(value) && value.length > 0) {
         args.push(spec.forward.flag, ...value.map(String));
       }
+    } else if (spec.kind === 'json') {
+      // `parseArgv` stores json-kind options already parsed, so the plain
+      // `String(value)` used below would hand upstream the literal
+      // "[object Object]". Re-serialise objects; leave a string alone so a
+      // library caller can pass raw JSON text without it being
+      // double-encoded.
+      args.push(
+        spec.forward.flag,
+        typeof value === 'string' ? value : JSON.stringify(value),
+      );
     } else {
       args.push(spec.forward.flag, String(value));
     }
@@ -1115,12 +1132,24 @@ async function listSessionFiles(cwd) {
  * This avoids picking up an unrelated neighbour session created by
  * another claude process that happened to finish around the same time.
  *
+ * Class (a) beats class (b) outright, and only the highest-mtime file
+ * WITHIN the winning class is returned. Ranking both classes together by
+ * mtime made this function pick a neighbour whenever one was touched
+ * later than our own session — which is the normal state of affairs when
+ * a background daemon holds a warm PTY in the same cwd: its JSONL keeps
+ * being appended, so it reliably out-races the file we just created.
+ * The wrong id then flows straight into `readSessionText`, whose
+ * strict-by-session-id path faithfully returns SOMEBODY ELSE'S
+ * transcript as this request's answer. A fresh spawn always creates a
+ * new file, so preferring class (a) removes that race; class (b) still
+ * covers the legitimate `--resume` append, where no new file appears.
+ *
  * @param {string|undefined} cwd
  * @param {number} since                  epoch-ms taken at the start of the request
  * @param {Map<string,number>} before     baseline filename -> mtimeMs from listSessionFiles
  * @returns {Promise<string|null>}
  */
-async function findRecentSessionId(cwd, since, before) {
+export async function findRecentSessionId(cwd, since, before) {
   // See listSessionFiles for the rationale on realpath + the `/_` -> `-`
   // mapping. Both helpers must agree, or the "did this file exist
   // before our request?" comparison silently misses every entry.
@@ -1129,21 +1158,32 @@ async function findRecentSessionId(cwd, since, before) {
   let entries;
   try { entries = await readdir(dir); } catch { return null; }
   const threshold = since - 1500;
-  let best = null;
-  let bestMtime = 0;
+  // Tracked separately so a newly-created file always wins over a
+  // neighbour that merely got appended to during our window.
+  let newBest = null; let newBestMtime = 0;
+  let movedBest = null; let movedBestMtime = 0;
   for (const name of entries) {
     if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.jsonl$/.test(name)) continue;
     let st;
     try { st = await stat(path.join(dir, name)); } catch { continue; }
     if (st.mtimeMs < threshold) continue;
     const baseline = before?.get(name);
-    if (baseline !== undefined && st.mtimeMs <= baseline + 100) continue; // existed before, didn't move
-    if (st.mtimeMs > bestMtime) {
-      bestMtime = st.mtimeMs;
-      best = name.replace(/\.jsonl$/, '');
+    if (baseline === undefined) {
+      // (a) Created during our run.
+      if (st.mtimeMs > newBestMtime) {
+        newBestMtime = st.mtimeMs;
+        newBest = name.replace(/\.jsonl$/, '');
+      }
+      continue;
+    }
+    if (st.mtimeMs <= baseline + 100) continue; // existed before, didn't move
+    // (b) Existed before and was appended to during our run.
+    if (st.mtimeMs > movedBestMtime) {
+      movedBestMtime = st.mtimeMs;
+      movedBest = name.replace(/\.jsonl$/, '');
     }
   }
-  return best;
+  return newBest ?? movedBest;
 }
 
 /**

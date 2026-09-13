@@ -1092,7 +1092,11 @@ export function createChatClient(opts = {}) {
  * @param {string} [cwd]   Directory used to derive the project dir key.
  * @returns {Promise<{ text: string, usage: object|null, tools: string[] } | null>}
  */
-export async function readSessionText(sessionId, t0 = 0, cwd = process.cwd()) {
+export async function readSessionText(sessionId, t0 = 0, cwd = process.cwd(), opts = {}) {
+  // `expectPrompt` is the prompt this request actually sent. It is used
+  // ONLY on the no-sessionId scan path below, to confirm a candidate
+  // transcript is ours before its text is returned as our answer.
+  const expectPrompt = typeof opts.expectPrompt === 'string' ? opts.expectPrompt : '';
   // Claude encodes the project cwd into a single token used as the
   // directory name under ~/.claude/projects/. The mapping replaces BOTH
   // path separators (`/`) and underscores (`_`) with a literal `-`, so
@@ -1233,10 +1237,55 @@ export async function readSessionText(sessionId, t0 = 0, cwd = process.cwd()) {
     .filter((c) => c.mtime >= t0)
     .sort((a, b) => b.mtime - a.mtime);
   for (const { f } of recent.slice(0, 5)) {
-    const r = await extractFromFile(path.join(projectDir, f), t0);
+    const full = path.join(projectDir, f);
+    // Ownership gate. Without a sessionId the only thing separating our
+    // transcript from a neighbour's is "most recently modified", and a
+    // concurrently-running session in the same cwd wins that race
+    // routinely (a daemon holding a warm PTY appends to its JSONL the
+    // whole time). Returning that file's text hands the caller somebody
+    // else's answer — the same leak the strict path above refuses to
+    // risk. When the caller tells us what it asked, require the file to
+    // contain that prompt before trusting it.
+    if (expectPrompt && !(await fileHasUserPrompt(full, expectPrompt))) continue;
+    const r = await extractFromFile(full, t0);
     if (r) return r;
   }
   return null;
+}
+
+/**
+ * Does this transcript contain the prompt we sent?
+ *
+ * Matching is deliberately loose at the tail and strict at the head: ocp
+ * appends its end-of-reply marker instruction to the prompt before typing
+ * it, and the TUI may reflow or truncate what it records, so an equality
+ * check would reject our own file. A leading-substring match on the first
+ * line is enough to tell our transcript apart from an unrelated one.
+ *
+ * @param {string} filePath
+ * @param {string} prompt
+ * @returns {Promise<boolean>}
+ */
+async function fileHasUserPrompt(filePath, prompt) {
+  const head = prompt.replace(/\s+/g, ' ').trim().slice(0, 120);
+  // Too short to identify anything — do not use it as evidence either way.
+  if (head.length < 8) return true;
+  let raw;
+  try { raw = await readFile(filePath, 'utf8'); } catch { return false; }
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let ev;
+    try { ev = JSON.parse(line); } catch { continue; }
+    if (ev.message?.role !== 'user') continue;
+    const content = ev.message.content;
+    const text = typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content.filter((c) => c?.type === 'text').map((c) => c.text ?? '').join(' ')
+        : '';
+    if (text.replace(/\s+/g, ' ').includes(head)) return true;
+  }
+  return false;
 }
 
 /**

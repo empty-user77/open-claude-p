@@ -174,7 +174,7 @@ ocp --output-format stream-json "こんにちは"
 
 # モデルを指定
 ocp --model sonnet "複雑な質問..."
-ocp --model claude-opus-4-7 "アーキテクチャレビュー..."
+ocp --model claude-opus-5 "アーキテクチャレビュー..."
 
 # システムプロンプトを追加
 ocp --append-system-prompt "常に日本語で答えてください" "what's the weather?"
@@ -290,7 +290,7 @@ const result = await driver.runOneShot({
 
   // ── モデル / 動作 ────────────────────────────
   model: 'sonnet',                        // モデル名
-  effort: 'high',                         // 'low' | 'medium' | 'high' | 'max'
+  effort: 'high',                         // 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   thinking: 'adaptive',                   // 'enabled' | 'adaptive' | 'disabled'
   maxTurns: 5,                            // 最大エージェントターン数（shim 強制）
 
@@ -634,7 +634,7 @@ OCP_NO_DAEMON=1 ocp "一度だけ実行"
 
 | req フィールド | CLI フラグ | 型 | 説明 |
 |-------------|---------|---|------|
-| `model` | `--model` | string | モデル名（例：`sonnet`、`claude-sonnet-4-6`） |
+| `model` | `--model` | string | モデル名（例：`sonnet`、`claude-opus-5`） |
 | `systemPrompt` | `--system-prompt` | string | システムプロンプト全体を置換 |
 | `appendSystemPrompt` | `--append-system-prompt` | string | デフォルトシステムプロンプトに追加 |
 | `dangerouslySkipPermissions` | `--dangerously-skip-permissions` | boolean | 権限チェックをスキップ |
@@ -645,11 +645,11 @@ OCP_NO_DAEMON=1 ocp "一度だけ実行"
 | `forkSession` | `--fork-session` | boolean | 再開時に新しいセッション ID を作成 |
 | `sessionId` | `--session-id` | string | 新しいセッションに特定の UUID を指定 |
 | `noSessionPersistence` | `--no-session-persistence` | boolean | セッション保存を無効化 |
-| `effort` | `--effort` | enum | `low` \| `medium` \| `high` \| `max` |
+| `effort` | `--effort` | enum | `low` \| `medium` \| `high` \| `xhigh` \| `max` |
 | `thinking` | `--thinking` | enum | `enabled` \| `adaptive` \| `disabled` |
 | `maxTurns` | `--max-turns` | number | 最大エージェントターン数 |
 | `fallbackModel` | `--fallback-model` | string | プライマリモデル過負荷時のフォールバック |
-| `permissionMode` | `--permission-mode` | string | `default` \| `plan` \| `acceptEdits` \| `bypassPermissions` |
+| `permissionMode` | `--permission-mode` | string | `acceptEdits` \| `auto` \| `bypassPermissions` \| `manual` \| `dontAsk` \| `plan` |
 | `mcpConfig` | `--mcp-config` | string[] | MCP 設定パス |
 | `addDir` | `--add-dir` | string[] | ツールがアクセスできる追加ディレクトリ |
 | `bare` | `--bare` | boolean | 最小モード（hooks、LSP、プラグインなどを無効化） |

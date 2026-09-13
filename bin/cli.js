@@ -29,6 +29,7 @@ process.on('uncaughtException', (e) => {
 import { parseArgv } from '../src/options/parse-argv.js';
 import { validate } from '../src/options/validate.js';
 import { OPTION_SPEC } from '../src/options/spec.js';
+import { forwardedRequestFields } from '../src/options/forward.js';
 import { createDriver } from '../src/index.js';
 import { sendToDaemon } from '../src/daemon/client.js';
 import { daemonKey, socketPath, resolveCwd } from '../src/daemon/socket.js';
@@ -65,7 +66,7 @@ const EXIT = {
 };
 
 async function main() {
-  const { options, positional, unknown, errors } = parseArgv(process.argv.slice(2));
+  const { options, positional, unknown, errors, supplied } = parseArgv(process.argv.slice(2));
 
   if (errors.length > 0) {
     process.stderr.write(errors.map((e) => `error: ${e}`).join('\n') + '\n');
@@ -95,11 +96,46 @@ async function main() {
   // retain the safer default (`false`) — this flip only changes the
   // CLI default. The opt-in `OCP_DEFAULT_SKIP_PERMS=1` from 1.0 is
   // still honoured but is now a no-op (the default already matches it).
+  //
+  // `--restricted` is the one case where the permissive default must
+  // stand down. Upstream refuses the combination outright ("Error:
+  // bypassPermissions not supported in restricted mode") and exits, so
+  // leaving the default on would make `ocp --restricted` fail every
+  // time with no output. Asking for restricted mode IS an explicit
+  // choice to keep the permission gates, so we honour it.
+  //
+  // NOTE on the `supplied` check: every option with a `default` is
+  // pre-seeded into `options`, so `options[x] === false` is ALSO true
+  // when the user passed nothing at all. Testing the value alone made
+  // this opt-out fire on every single invocation, which quietly turned
+  // the whole block into dead code — the default-on behaviour was in
+  // fact coming from `runOneShot`'s `?? true`, and an explicit
+  // `--dangerously-skip-permissions=false` was being ignored. Only a
+  // flag actually present in argv counts as an opt-out.
   const skipPermsOptOut = process.env.OCP_NO_SKIP_PERMS === '1'
                        || process.env.OCP_NO_SKIP_PERMS === 'true'
-                       || options['dangerously-skip-permissions'] === false;
+                       || (supplied.has('dangerously-skip-permissions')
+                           && options['dangerously-skip-permissions'] === false)
+                       || options.restricted === true;
   if (options['dangerously-skip-permissions'] !== true && !skipPermsOptOut) {
     options['dangerously-skip-permissions'] = true;
+  }
+  if (options.restricted === true && options['dangerously-skip-permissions'] === true) {
+    process.stderr.write(
+      'error: `--restricted` cannot be combined with ' +
+      '`--dangerously-skip-permissions` — the upstream CLI refuses ' +
+      'bypassPermissions in restricted mode.\n',
+    );
+    return EXIT.VALIDATION_ERROR;
+  }
+
+  // With the bypass gone, something still has to answer permission
+  // prompts, and PTY automation cannot. `--permission-prompts=none`
+  // denies anything that would prompt instead of hanging on it, which
+  // is the only setting that keeps a restricted run headless. The
+  // caller can still ask for `host` explicitly.
+  if (options.restricted === true && options['permission-prompts'] === undefined) {
+    options['permission-prompts'] = 'none';
   }
 
   // CLI-only default: honour `OCP_NO_SESSION_PERSISTENCE=1` when the user
@@ -116,12 +152,13 @@ async function main() {
   }
 
   // CLI-only default: pre-approve the read-only network tools so that a
-  // plain `ocp "오늘 날씨"` actually uses WebSearch/WebFetch instead of
-  // silently no-op'ing with "I can't access real-time info". These are
-  // safe-by-construction (no filesystem mutation, no shell exec); a
-  // headless tool that refuses to fetch the web for an automation
-  // surface is the wrong default. Caller-supplied `--allowed-tools`
-  // takes precedence (additive — we merge rather than replace).
+  // plain `ocp "what is the weather today"` actually uses WebSearch /
+  // WebFetch instead of silently no-op'ing with "I can't access
+  // real-time info". These are safe-by-construction (no filesystem
+  // mutation, no shell exec); a headless tool that refuses to fetch the
+  // web for an automation surface is the wrong default. Caller-supplied
+  // `--allowed-tools` takes precedence (additive — we merge rather than
+  // replace).
   // Set OCP_NO_DEFAULT_TOOLS=1 to opt out entirely.
   if (process.env.OCP_NO_DEFAULT_TOOLS !== '1') {
     const DEFAULT_SAFE_TOOLS = ['WebSearch', 'WebFetch'];
@@ -144,10 +181,11 @@ async function main() {
 
   // CLI-only default: encourage tool use for current/time-sensitive
   // queries via the same SDK-wide DEFAULT_APPEND_SYSTEM_PROMPT the
-  // chat client already uses. Without this, a plain `ocp "오늘 날씨"`
-  // refuses with "I can't access real-time data" instead of calling
-  // WebSearch — because Claude's print-mode default behaviour leans
-  // toward declining over tool-use when it can answer with disclaimers.
+  // chat client already uses. Without this, a plain prompt such as
+  // `ocp "what is the weather today"` refuses with "I can't access
+  // real-time data" instead of calling WebSearch — because Claude's
+  // print-mode default behaviour leans toward declining over tool-use
+  // when it can answer with disclaimers.
   // This is a generic, ONE-LINE rule ("use tools when you need to look
   // something up"), not tool-by-tool guidance, so it stays within the
   // "common rules" policy. Caller-supplied `--append-system-prompt`
@@ -248,19 +286,18 @@ async function main() {
       // regardless of what the requester intended. Daemon rejects on
       // mismatch.
       claudeBin: process.env.OCP_CLAUDE_BIN || 'claude',
-      model: options.model,
-      systemPrompt: options['system-prompt'],
-      appendSystemPrompt: options['append-system-prompt'],
-      allowedTools: options['allowed-tools'],
-      disallowedTools: options['disallowed-tools'],
-      dangerouslySkipPermissions: options['dangerously-skip-permissions'],
-      permissionMode: options['permission-mode'],
-      debug: options.debug,
-      verbose: options.verbose,
+      ...forwardedRequestFields(options),
+      // Always a concrete boolean. `forwardedRequestFields` omits `false`
+      // (there is no argv to emit for it), but `runOneShot` resolves a
+      // missing field with `?? true` — so omitting it would silently
+      // re-enable the permission bypass the caller just opted out of via
+      // `OCP_NO_SKIP_PERMS=1`, `--dangerously-skip-permissions=false`, or
+      // `--restricted`.
+      dangerouslySkipPermissions: options['dangerously-skip-permissions'] === true,
+      // Shim-enforced options: no upstream flag, handled by the driver.
       maxTurns: options['max-turns'],
       maxBudgetUsd: options['max-budget-usd'],
       taskBudget: options['task-budget'],
-      noSessionPersistence: options['no-session-persistence'],
       passThroughArgv: unknown,
     };
 
@@ -328,21 +365,17 @@ async function main() {
         prompt,
         cwd: options.cwd,
         outputFormat,
-        model: options.model,
-        systemPrompt: options['system-prompt'],
-        appendSystemPrompt: options['append-system-prompt'],
-        allowedTools: options['allowed-tools'],
-        disallowedTools: options['disallowed-tools'],
-        dangerouslySkipPermissions: options['dangerously-skip-permissions'],
-        permissionMode: options['permission-mode'],
-        verbose: options.verbose,
-        continue: options.continue,
-        resume: options.resume,
-        forkSession: options['fork-session'],
-        noSessionPersistence: options['no-session-persistence'],
-        sessionId: options['session-id'],
+        ...forwardedRequestFields(options, { printMode: true }),
+        // Always a concrete boolean. `forwardedRequestFields` omits `false`
+        // (there is no argv to emit for it), but `runOneShot` resolves a
+        // missing field with `?? true` — so omitting it would silently
+        // re-enable the permission bypass the caller just opted out of via
+        // `OCP_NO_SKIP_PERMS=1`, `--dangerously-skip-permissions=false`, or
+        // `--restricted`.
+        dangerouslySkipPermissions: options['dangerously-skip-permissions'] === true,
         passThroughArgv: unknown,
         abortSignal: ac.signal,
+        // Shim-enforced options: no upstream flag, handled by the driver.
         maxTurns: options['max-turns'],
         maxBudgetUsd: options['max-budget-usd'],
         printSink: process.stdout,
@@ -401,25 +434,20 @@ async function runOneTurn({ driver, adapter, options, unknown, ac, prompt, resum
   const result = await driver.runOneShot({
     prompt,
     cwd: options.cwd,
-    model: options.model,
-    systemPrompt: options['system-prompt'],
-    appendSystemPrompt: options['append-system-prompt'],
-    allowedTools: options['allowed-tools'],
-    disallowedTools: options['disallowed-tools'],
-    dangerouslySkipPermissions: options['dangerously-skip-permissions'],
-    permissionMode: options['permission-mode'],
-    debug: options.debug,
-    verbose: options.verbose,
-    continue: options.continue,
+    ...forwardedRequestFields(options),
+    // Always a concrete boolean. `forwardedRequestFields` omits `false`
+    // (there is no argv to emit for it), but `runOneShot` resolves a
+    // missing field with `?? true` — so omitting it would silently
+    // re-enable the permission bypass the caller just opted out of via
+    // `OCP_NO_SKIP_PERMS=1`, `--dangerously-skip-permissions=false`, or
+    // `--restricted`.
+    dangerouslySkipPermissions: options['dangerously-skip-permissions'] === true,
+    // The stream-json input loop threads each turn's session id back in
+    // so turn N+1 resumes turn N; it must win over `--resume` from argv.
     resume: resumeOverride ?? options.resume,
-    forkSession: options['fork-session'],
-    noSessionPersistence: options['no-session-persistence'],
-    resumeSessionAt: options['resume-session-at'],
-    rewindFiles: options['rewind-files'],
-    sessionId: options['session-id'],
-    name: options.name,
     passThroughArgv: unknown,
     abortSignal: ac.signal,
+    // Shim-enforced options: no upstream flag, handled by the driver.
     maxTurns: options['max-turns'],
     maxBudgetUsd: options['max-budget-usd'],
     taskBudget: options['task-budget'],
@@ -432,14 +460,18 @@ async function runOneTurn({ driver, adapter, options, unknown, ac, prompt, resum
   // alone cannot scrub; the JSONL file is what claude itself stores
   // and contains only the assistant's message verbatim. We call
   // readSessionText even when sessionId is null — it falls back to the
-  // most-recently-modified JSONL written during this request window.
+  // most-recently-modified JSONL written during this request window,
+  // gated on the transcript actually containing the prompt we sent so a
+  // concurrent session in the same cwd cannot answer for us.
   let finalText = result.text;
   let usage = null;
   let toolsFromSession = [];
   if (!result.isError) {
     try {
       const { readSessionText } = await import('../src/chat/index.js');
-      const sessionRead = await readSessionText(result.sessionId, startTime, options.cwd);
+      const sessionRead = await readSessionText(
+        result.sessionId, startTime, options.cwd, { expectPrompt: prompt },
+      );
       if (sessionRead?.text) finalText = sessionRead.text;
       if (sessionRead?.usage) usage = sessionRead.usage;
       if (sessionRead?.tools) toolsFromSession = sessionRead.tools;
