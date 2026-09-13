@@ -65,6 +65,27 @@ const EXIT = {
   NOT_IMPLEMENTED: 8,
 };
 
+/**
+ * Scrub TUI chrome out of PTY-extracted text.
+ *
+ * Only for text reconstructed from terminal frames. Text read from the
+ * upstream session JSONL is already clean and must be passed through
+ * untouched. Failures are swallowed: a scrub that throws must never cost
+ * the caller their answer.
+ *
+ * @param {string} text
+ * @returns {Promise<string>}
+ */
+async function scrubPtyText(text) {
+  if (typeof text !== 'string' || text === '') return text;
+  try {
+    const { cleanResponse } = await import('../src/chat/index.js');
+    return cleanResponse(text);
+  } catch {
+    return text;
+  }
+}
+
 async function main() {
   const { options, positional, unknown, errors, supplied } = parseArgv(process.argv.slice(2));
 
@@ -309,8 +330,10 @@ async function main() {
         process.stdout,
       );
       for (const ev of (result.events ?? [])) adapter.onEvent(ev);
+      // Daemon results are always PTY-extracted — the daemon does not read
+      // the upstream session file — so they need the same scrub.
       adapter.end({
-        text: result.text,
+        text: await scrubPtyText(result.text),
         isError: result.isError,
         sessionId: result.sessionId,
         cost: result.cost,
@@ -466,17 +489,24 @@ async function runOneTurn({ driver, adapter, options, unknown, ac, prompt, resum
   let finalText = result.text;
   let usage = null;
   let toolsFromSession = [];
+  let fromSessionFile = false;
   if (!result.isError) {
     try {
       const { readSessionText } = await import('../src/chat/index.js');
       const sessionRead = await readSessionText(
         result.sessionId, startTime, options.cwd, { expectPrompt: prompt },
       );
-      if (sessionRead?.text) finalText = sessionRead.text;
+      if (sessionRead?.text) { finalText = sessionRead.text; fromSessionFile = true; }
       if (sessionRead?.usage) usage = sessionRead.usage;
       if (sessionRead?.tools) toolsFromSession = sessionRead.tools;
     } catch { /* keep PTY-extracted fallback */ }
   }
+  // The JSONL is always clean; PTY-extracted text is not. `cleanResponse`
+  // exists as the last line of defence for exactly this fallback, but the
+  // CLI never called it — only the chat client did — so a run that could
+  // not read the session file printed the TUI's spinner cell and usage
+  // meters around the answer.
+  if (!fromSessionFile) finalText = await scrubPtyText(finalText);
 
   adapter.end({
     text: finalText,

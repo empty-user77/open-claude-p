@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.2] — 2026-09-13
+
+Fixes the two defects listed as known issues in 1.2.1. Both were
+pre-existing — they predate the 1.2.x work — and both were tracked to
+root cause before anything was changed.
+
+### Fixed
+
+- **Replies lost every space between words.** The upstream TUI does not
+  emit literal spaces between words on a redraw; it positions each word
+  with an absolute column move and lets the terminal leave the gap blank:
+
+  ```
+  A\x1b[5Gpseudoterminal\x1b[20Gis\x1b[23Ga\x1b[25Gsoftware
+  ```
+
+  `ansi-strip` translated only CUF (`ESC [ Pn C`) into spaces. CHA
+  (`ESC [ Pn G`) — which the current CLI uses for nearly every word — was
+  deleted by the general CSI strip, so the reply came back as
+  `Apseudoterminalisasoftware…`. The parser now tracks the cursor column
+  and expands any forward horizontal move, CUF and CHA alike, into the
+  run of spaces it would have left on screen. CUP (`H`/`f`) adopts the
+  column without padding, since it is a jump to another region rather
+  than a gap.
+
+- **The CLI printed the TUI's spinner cell and usage meters around the
+  answer.** `cleanResponse` exists as the last line of defence for
+  PTY-extracted text — its own docstring says so — but only the chat
+  client ever called it. The CLI printed raw PTY text whenever the
+  upstream session file was unavailable, which is exactly when the scrub
+  is needed. Both CLI paths now scrub, and the pattern set gained the
+  rate-limit meters (`Usage ██░░ 16% (resets in 3h)`), the bare context
+  meter, and the spinner status cell with its token counters (`63✢  88`).
+  Guards keep real prose intact: meters must carry bar glyphs, counter
+  cells must carry a digit beside the glyph and the multi-space padding
+  the TUI uses, and a reply that is legitimately just a number ("what is
+  6*7" → "42") is never swallowed.
+
+- **Sessions started from inside a Claude Code session were never
+  persisted.** When `ocp` itself runs under Claude Code — an agent
+  driving it, or a developer testing from one — the spawned `claude`
+  inherited the caller's session identity, most decisively
+  `CLAUDE_CODE_CHILD_SESSION`, and concluded it was a continuation of the
+  parent rather than a new session. It then wrote no session JSONL at
+  all: `sessionId` came back `null`, the clean transcript ocp prefers was
+  unavailable so every answer fell back to PTY-scraped text, and
+  `--continue` / `--resume` had nothing to resume. The driver now removes
+  the caller's session-identity variables when spawning. User-facing
+  configuration (`CLAUDE_CODE_SIMPLE`, `CLAUDE_CODE_SAFE_MODE`, provider
+  toggles, …) is untouched, an explicit value in `opts.env` still wins,
+  and `OCP_KEEP_PARENT_SESSION_ENV=1` restores the old behaviour.
+
+### Tests
+
+- 237 → 243. New coverage: `test/ansi-cha.test.js` (absolute column moves,
+  including the verbatim byte sequence captured off the wire) and
+  `test/parent-session-env.test.js`. `test/clean-response.test.js` gains
+  the meter, spinner-cell and numeric-answer cases.
+
+### Verification
+
+Each fix was reproduced first, then confirmed against the real CLI:
+replaying the captured session through the parser now yields the sentence
+with its spacing intact; a warm-daemon second turn prints the answer with
+no chrome; and `--continue` recalls a word from the previous turn, which
+it could not do before.
+
+---
+
 ## [1.2.1] — 2026-09-13
 
 Re-sync with Claude Code 2.1.270 and the current model lineup, and fix a
