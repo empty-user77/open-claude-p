@@ -1328,7 +1328,28 @@ export const TUI_CHROME_PATTERNS = [
 // 2 MCPs | 4 hooks - Zero-config…"). These must NOT drop the whole
 // line — only the matched fragment. Order matters: longer / more
 // specific variants first so the shorter ones don't partial-match.
+// Spinner glyphs the TUI cycles through. Kept in sync with
+// `PATTERNS.spinnerLeading` in `src/parsers/tui-frame.js`.
+const SPINNER_GLYPHS = '✻✶✺✹✸✷✵●✢✳✽·✾✿❀❁❂❃❄❅❆❇❈❉❊❋';
+
 export const TUI_CHROME_INLINE_PATTERNS = [
+  // Rate-limit meters painted to the right of a streamed reply:
+  // `Usage ██░░░░░░░░ 16% (resets in 3h 18m)`, `| Weekly ░░░ 3% (resets in 6d 1h)`.
+  // Anchored on the bar glyphs so ordinary prose with a percentage is safe.
+  new RegExp(
+    String.raw`\s*\|?\s*(?:Usage|Weekly)\s*[█░▒▓]+\s*\d+%\s*\(resets in [^)]*\)`,
+    'gi',
+  ),
+  // Bare context meter: `██████░░░░ 22% │`.
+  /\s*[█░▒▓]{2,}\s*\d+%\s*│?/g,
+  // The animated status cell the TUI paints to the LEFT of a reply,
+  // carrying token counters: `63✢      88  `. Two guards keep real prose
+  // safe: a digit must sit beside the glyph, and the cell must be
+  // separated from the content by the multi-space padding the TUI uses.
+  // That padding is what distinguishes the chrome `✳ 128  Here is …`
+  // from an ordinary bullet like `· 5 minutes later`.
+  new RegExp(String.raw`^\s*\d+\s*[${SPINNER_GLYPHS}]\s*\d*\s{2,}`, 'g'),
+  new RegExp(String.raw`^\s*[${SPINNER_GLYPHS}]\s*\d+\s{2,}`, 'g'),
   /\s*\d+\s+CLAUDE\.md\s*\|\s*\d+\s+rules?\s*\|\s*\d+\s+MCPs?\s*\|\s*\d+\s+hooks?/gi,
   /\s*\d+\s+rules?\s*\|\s*\d+\s+MCPs?\s*\|\s*\d+\s+hooks?/gi,
   /\s*\d+\s+MCP servers?\s+need(?:s)?\s+auth\s*·\s*\/mcp/gi,
@@ -1344,7 +1365,7 @@ export const TUI_CHROME_INLINE_PATTERNS = [
  * @param {string} text
  */
 export function cleanResponse(text) {
-  return String(text ?? '')
+  const cleaned = String(text ?? '')
     .replace(/\r/g, '\n')
     .split('\n')
     .map((l) => l.trimEnd())
@@ -1368,4 +1389,19 @@ export function cleanResponse(text) {
     .replace(/\n{3,}/g, '\n\n')
     .replace(SENTINEL_REGEX, '')
     .trim();
+
+  // The TUI paints bare token counters (`63`, `128`) around a streamed
+  // reply, and once the surrounding chrome is gone they are left stranded
+  // on their own lines. Drop them — but ONLY when other content survives,
+  // so a reply that is legitimately just a number ("what is 6*7" -> "42")
+  // is never swallowed.
+  const lines = cleaned.split('\n');
+  // A counter cell is a bare integer, optionally still carrying the
+  // spinner glyph it was painted next to.
+  const isBareCounter = (l) =>
+    new RegExp(String.raw`^\s*[${SPINNER_GLYPHS}]?\s*\d{1,6}\s*$`).test(l);
+  if (lines.some((l) => l.trim() !== '' && !isBareCounter(l))) {
+    return lines.filter((l) => !isBareCounter(l)).join('\n').trim();
+  }
+  return cleaned;
 }

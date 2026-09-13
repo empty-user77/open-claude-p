@@ -133,3 +133,101 @@ describe('cleanResponse — TUI chrome scrubbing', () => {
     for (const re of TUI_CHROME_PATTERNS) assert.ok(re instanceof RegExp);
   });
 });
+
+describe('cleanResponse: statusline meters leaked onto the answer line', () => {
+  // Verbatim from a warm-daemon run (claude 2.1.270 with a statusline
+  // plugin active). The TUI paints its spinner cell to the left of the
+  // streamed reply and the usage meters to the right, and when the
+  // upstream JSONL is unavailable all three land on one line.
+  const LEAKED =
+    '63✢                  88  A pseudoterminal is a pair of virtual devices ' +
+    'that emulate a physical terminal to allow programs to interact with user ' +
+    'input and output streams bidirectionally.          ██         22% │ ' +
+    'Usage ██░░░░░░░░ 16% (resets in 3h 18m) | Weekly ░░░░░░░░░░ 3% (resets in 6d 1h)';
+
+  test('the answer survives intact', () => {
+    const out = cleanResponse(LEAKED);
+    assert.match(out, /^A pseudoterminal is a pair of virtual devices/);
+    assert.match(out, /bidirectionally\.$/);
+  });
+
+  test('the usage and weekly meters are gone', () => {
+    const out = cleanResponse(LEAKED);
+    assert.doesNotMatch(out, /Usage/);
+    assert.doesNotMatch(out, /Weekly/);
+    assert.doesNotMatch(out, /resets in/);
+  });
+
+  test('meter bar glyphs are gone', () => {
+    assert.doesNotMatch(cleanResponse(LEAKED), /[█░]/);
+  });
+
+  test('the leading spinner cell and its counters are gone', () => {
+    const out = cleanResponse(LEAKED);
+    assert.doesNotMatch(out, /^\s*\d/);
+    assert.doesNotMatch(out, /✢/);
+  });
+
+  test('a spinner cell with the counter on the right is also handled', () => {
+    assert.equal(cleanResponse('✳ 128  Here is the answer.'), 'Here is the answer.');
+  });
+
+  test('prose containing percentages and pipes is not damaged', () => {
+    // The meter patterns require bar glyphs, so ordinary text with a
+    // percentage or a pipe must pass through untouched.
+    const prose = 'Throughput rose 22% | latency fell, and coverage hit 91%.';
+    assert.equal(cleanResponse(prose), prose);
+  });
+
+  test('a bulleted line is not mistaken for a spinner cell', () => {
+    // `·` is in the spinner glyph set; without an adjacent counter it is
+    // just a bullet and the line must survive.
+    assert.equal(cleanResponse('· install the dependencies'), '· install the dependencies');
+  });
+
+  test('a line that is only a meter is dropped entirely', () => {
+    assert.equal(cleanResponse('██████░░░░ 22% │ Usage ██░░ 16% (resets in 3h)'), '');
+  });
+});
+
+describe('cleanResponse: stray token counters', () => {
+  test('a bare counter line beside real content is dropped', () => {
+    assert.equal(cleanResponse('63\nA pseudoterminal emulates a terminal.'),
+      'A pseudoterminal emulates a terminal.');
+    assert.equal(cleanResponse('A pseudoterminal emulates a terminal.\n128'),
+      'A pseudoterminal emulates a terminal.');
+  });
+
+  test('a numeric answer is NOT dropped when it is the whole reply', () => {
+    // `ocp "what is 6*7"` must still be able to answer "42".
+    assert.equal(cleanResponse('42'), '42');
+    assert.equal(cleanResponse('  42  '), '42');
+  });
+
+  test('a numeric line inside a list survives', () => {
+    // Only lines that are nothing but a bare integer are candidates, and
+    // only when other content exists — but a numbered/among-prose figure
+    // that carries any other character must never be touched.
+    assert.equal(cleanResponse('Results:\n42 requests\ndone'),
+      'Results:\n42 requests\ndone');
+  });
+});
+
+describe('cleanResponse: spinner cell left alone on a line', () => {
+  test('a glyph-plus-counter line beside real content is dropped', () => {
+    assert.equal(
+      cleanResponse('✢                    63\nA pseudoterminal emulates a terminal.'),
+      'A pseudoterminal emulates a terminal.',
+    );
+    assert.equal(cleanResponse('✳ 128\nThe answer.'), 'The answer.');
+  });
+
+  test('a numeric answer is still never swallowed', () => {
+    assert.equal(cleanResponse('42'), '42');
+  });
+
+  test('a glyph line with prose is not dropped', () => {
+    assert.equal(cleanResponse('· 5 minutes later\nthen it finished'),
+      '· 5 minutes later\nthen it finished');
+  });
+});

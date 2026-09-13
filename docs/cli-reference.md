@@ -152,6 +152,7 @@ Every flag in this section is forwarded verbatim to the upstream
 | `OCP_NO_LIVE` | unset | When `=1`, disable the live spinner / phase indicator on stderr even when the terminal is a TTY. Useful when `--debug` output competes with the spinner for the same stderr stream. |
 | `OCP_NO_META` | unset | When `=1`, suppress the trailing meta line (`⏱ … · ↑/↓ tok · $… · 🔧 …`). Equivalent to `--no-meta`. |
 | `OCP_DEBUG` | unset | When `=1`, surface full stack traces from the top-level CLI catch (otherwise only `e.message`). Per-invocation `--debug` is the same thing. |
+| `OCP_KEEP_PARENT_SESSION_ENV` | unset | When `=1`, pass the calling Claude Code session's identity variables (`CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, the IPC bridge, …) through to the spawned `claude` instead of scrubbing them. Only relevant when `ocp` itself runs inside a Claude Code session; inheriting them makes the child treat itself as a continuation of the parent and write no session file at all. Leave unset unless you are deliberately nesting sessions. |
 | `OCP_AX_SCREEN_READER` | unset | When `=1`, pass `--ax-screen-reader` upstream so the TUI renders flat text with no decorative borders or animations. ocp rebuilds its answer by scraping TUI frames, so this leaves the parsers less chrome to strip. Off by default because it changes the captured frame shape. Equivalent to `--ax-screen-reader`. |
 
 Options that declare an environment variable (`OCP_PRINT_MODE`,

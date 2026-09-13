@@ -143,6 +143,51 @@ export function sanitizePassThroughArgv(argv) {
  * `runOneShot()` spawns a fresh PTY session; pass `poolSize: N` to opt
  * into warm-session reuse.
  */
+// Environment variables that identify the *calling* Claude Code session —
+// its id, its IPC bridge, its resolved binary — rather than configuring
+// Claude generally. When `ocp` itself runs inside a Claude Code session
+// (an agent driving it, or a developer testing from one) the child
+// `claude` inherits all of them and concludes it is a continuation of the
+// parent rather than a new session. The visible consequence is that it
+// writes no session JSONL at all: `sessionId` comes back null, the clean
+// transcript ocp prefers is unavailable so answers fall back to
+// PTY-scraped text, and `--continue` / `--resume` have nothing to resume.
+//
+// The child is a new, independent session, so these must not carry over.
+// User-facing configuration (`CLAUDE_CODE_SIMPLE`, `CLAUDE_CODE_SAFE_MODE`,
+// provider toggles, …) is deliberately NOT in this list and passes through
+// untouched. Set OCP_KEEP_PARENT_SESSION_ENV=1 to disable the scrub.
+const PARENT_SESSION_ENV = [
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_BRIDGE_SESSION_ID',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_CODE_EXECPATH',
+];
+
+/**
+ * Remove the calling Claude Code session's identity from a spawn env.
+ *
+ * Returns a new object; the input is not mutated. An explicit value in
+ * `opts.env` wins — if a caller deliberately sets one of these, we honour
+ * it rather than second-guessing them.
+ *
+ * @param {Record<string, string|undefined>} env
+ * @param {Record<string, string|undefined>} [explicit]  caller-supplied overrides
+ * @returns {Record<string, string|undefined>}
+ */
+export function scrubParentSessionEnv(env, explicit = {}) {
+  if (process.env.OCP_KEEP_PARENT_SESSION_ENV === '1') return { ...env };
+  const out = { ...env };
+  for (const key of PARENT_SESSION_ENV) {
+    if (Object.prototype.hasOwnProperty.call(explicit, key)) continue;
+    delete out[key];
+  }
+  return out;
+}
+
 export function createDriver(driverOpts = {}) {
   return new Driver(driverOpts);
 }
@@ -252,7 +297,7 @@ class Driver {
       process.env.OCP_PRINT_MODE === 'true';
     if (printMode) {
       const cwd = req.cwd ?? this.opts.cwd;
-      const env = { ...process.env, ...this.opts.env };
+      const env = scrubParentSessionEnv({ ...process.env, ...this.opts.env }, this.opts.env);
       const r = await runPrintMode({
         bin: this.opts.claudeBin,
         req,
@@ -331,7 +376,7 @@ class Driver {
     // Pool eligibility: explicit resume/continue bind to a specific past
     // session and are not poolable (they bypass the pool entirely).
     const cwd = req.cwd ?? this.opts.cwd;
-    const env = { ...process.env, ...this.opts.env };
+    const env = scrubParentSessionEnv({ ...process.env, ...this.opts.env }, this.opts.env);
     const pool = this._getPool();
     const isResumeLike =
       (typeof req.resume === 'string' && req.resume !== '') ||
